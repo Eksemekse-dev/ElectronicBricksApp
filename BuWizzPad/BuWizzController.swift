@@ -4,7 +4,8 @@ import GameController
 import Combine
 
 enum BuWizzSpec {
-    static let serviceUUID = CBUUID(string: "936E67B1-1999-B388-8144-FB74D1920550")
+    static let serviceUUID = CBUUID(string: "500592D1-74FB-4481-88B3-9919B1676E93")
+    static let appCharPrefix = "50052901"
     static let appCharShort = CBUUID(string: "2901")
     static let appCharLong = CBUUID(string: "00002901-0000-1000-8000-00805F9B34FB")
     static let cmdSetMotor: UInt8 = 0x30
@@ -263,6 +264,13 @@ final class BuWizzController: NSObject, ObservableObject {
             char.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
         peripheral.writeValue(payload, for: char, type: writeType)
     }
+
+    private func isApplicationCharacteristic(_ uuid: CBUUID) -> Bool {
+        let upper = uuid.uuidString.uppercased()
+        return upper.hasPrefix(BuWizzSpec.appCharPrefix)
+            || uuid == BuWizzSpec.appCharShort
+            || uuid == BuWizzSpec.appCharLong
+    }
 }
 
 extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
@@ -381,10 +389,9 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
 
         for ch in chars {
             log("Char \(ch.uuid.uuidString) props=\(ch.properties.rawValue)")
-            let isAppChar = ch.uuid == BuWizzSpec.appCharShort || ch.uuid == BuWizzSpec.appCharLong
             let canWrite = ch.properties.contains(.write) || ch.properties.contains(.writeWithoutResponse)
 
-            if isAppChar && canWrite {
+            if isApplicationCharacteristic(ch.uuid) && canWrite {
                 txCharacteristic = ch
                 if ch.properties.contains(.notify) {
                     peripheral.setNotifyValue(true, for: ch)
