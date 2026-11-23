@@ -63,6 +63,12 @@ struct MainDriveView: View {
                         }
                     }
 
+                    Picker("Tryb serwa", selection: $ctrl.servoProtocolMode) {
+                        ForEach(ServoProtocolMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(format: "Powrót na środek: %.0f%%", ctrl.profile.returnToCenterSmoothing * 100))
                             .font(.caption.monospacedDigit())
@@ -73,39 +79,75 @@ struct MainDriveView: View {
                         .font(.footnote.bold())
 
                     Text(String(
-                        format: "Lewo: %.2f  |  Środek: %.2f  |  Prawo: %.2f",
+                        format: "Lewo: %.2f  |  Środek: %+.2f  |  Prawo: %+.2f",
                         ctrl.profile.leftLimit,
                         ctrl.profile.centerOffset,
                         ctrl.profile.rightLimit
                     ))
                     .font(.footnote.monospacedDigit())
 
+                    // Korekta krokowa -0.05 / +0.05 dla każdego punktu
+                    HStack {
+                        Text("Lewo:")
+                            .font(.caption.monospaced())
+                        Button("-0.05") { ctrl.nudgeLeftLimit(by: -0.05) }
+                        Button("+0.05") { ctrl.nudgeLeftLimit(by: 0.05) }
+                        Spacer()
+                        Button("Z gałki") { ctrl.setLeftLimitFromCurrentServoStick() }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+
+                    HStack {
+                        Text("Środek:")
+                            .font(.caption.monospaced())
+                        Button("-0.05") { ctrl.nudgeCenter(by: -0.05) }
+                        Button("+0.05") { ctrl.nudgeCenter(by: 0.05) }
+                        Spacer()
+                        Button("Z gałki") { ctrl.setCenterFromCurrentServoStick() }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+
+                    HStack {
+                        Text("Prawo:")
+                            .font(.caption.monospaced())
+                        Button("-0.05") { ctrl.nudgeRightLimit(by: -0.05) }
+                        Button("+0.05") { ctrl.nudgeRightLimit(by: 0.05) }
+                        Spacer()
+                        Button("Z gałki") { ctrl.setRightLimitFromCurrentServoStick() }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+
                     HStack {
                         if ctrl.autoCalibrating {
-                            Button("Anuluj auto", role: .destructive) {
-                                ctrl.cancelAutoServoCalibration()
+                            Button("Złap Lewo") {
+                                ctrl.captureCurrentSweepLeft()
                             }
                             .buttonStyle(.borderedProminent)
+
+                            Button("Złap Prawo") {
+                                ctrl.captureCurrentSweepRight()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Anuluj", role: .destructive) {
+                                ctrl.cancelAutoServoCalibration()
+                            }
+                            .buttonStyle(.bordered)
                         } else {
                             Button("Auto-kalibracja") {
                                 ctrl.startAutoServoCalibration()
                             }
                             .buttonStyle(.borderedProminent)
-                        }
 
-                        Button("Reset") {
-                            ctrl.resetProfile()
+                            Button("Reset (-1/+1)") {
+                                ctrl.resetProfile()
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
                     }
-
-                    HStack {
-                        Button("Ręcz. Lewo") { ctrl.setLeftLimitFromCurrentServoStick() }
-                        Button("Środek") { ctrl.setCenterFromCurrentServoStick() }
-                        Button("Ręcz. Prawo") { ctrl.setRightLimitFromCurrentServoStick() }
-                    }
-                    .buttonStyle(.bordered)
-                    .font(.caption)
                 }
 
                 Section("Porty (1–6), tryby i limit mocy") {
@@ -183,6 +225,9 @@ struct MainDriveView: View {
                         ctrl.leftStickX, ctrl.leftStickY, ctrl.rightStickX, ctrl.rightStickY
                     ))
                     .font(.caption.monospaced())
+
+                    Text("Kanały 1–6: " + ctrl.channelValuesPreview.map { String($0) }.joined(separator: ", "))
+                        .font(.caption.monospaced())
 
                     Text("Ramka: \(ctrl.lastFrameHex)")
                         .font(.caption.monospaced())
