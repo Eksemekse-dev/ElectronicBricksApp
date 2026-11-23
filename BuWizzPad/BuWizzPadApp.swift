@@ -16,7 +16,7 @@ struct MainDriveView: View {
         NavigationStack {
             List {
                 Section("Połączenie") {
-                    LabeledContent("BuWizz3", value: ctrl.connectionState)
+                    LabeledContent("Status", value: ctrl.connectionState)
                     LabeledContent("Pad", value: ctrl.hasPad ? "Wykryty" : "Brak")
                     HStack {
                         Button("Skanuj i połącz") {
@@ -24,13 +24,47 @@ struct MainDriveView: View {
                         }
                         .buttonStyle(.borderedProminent)
 
+                        Button("Ponów usługi") {
+                            ctrl.retryDiscoverServices()
+                        }
+                        .buttonStyle(.bordered)
+
                         Spacer()
 
                         Button("Rozłącz", role: .destructive) {
                             ctrl.disconnect()
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!ctrl.isConnected)
+                        .disabled(ctrl.connectionState == "Rozłączono")
+                    }
+                }
+
+                Section("Telemetria i logi") {
+                    Text(String(format: "Gałka X: %+.2f | Gałka Y: %+.2f", ctrl.stickX, ctrl.stickY))
+                        .font(.footnote.monospaced())
+                    Text("Ramka: \(ctrl.lastFrameHex)")
+                        .font(.caption.monospaced())
+                    ForEach(ctrl.logs, id: \.self) { line in
+                        Text(line)
+                            .font(.caption2.monospaced())
+                    }
+                }
+
+                if !ctrl.discoveredDevices.isEmpty {
+                    Section("Wykryte urządzenia BLE") {
+                        ForEach(ctrl.discoveredDevices) { dev in
+                            Button {
+                                ctrl.connect(to: dev)
+                            } label: {
+                                HStack {
+                                    Text(dev.name)
+                                    Spacer()
+                                    Text("\(dev.rssi) dBm")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -67,13 +101,6 @@ struct MainDriveView: View {
                         ctrl.resetProfile()
                     }
                     .font(.footnote)
-                }
-
-                Section("Telemetria lokalna") {
-                    Text(String(format: "Gałka X: %+.2f | Gałka Y: %+.2f", ctrl.stickX, ctrl.stickY))
-                        .font(.footnote.monospaced())
-                    Text("Ramka: \(ctrl.lastFrameHex)")
-                        .font(.caption.monospaced())
                 }
             }
             .navigationTitle("BuWizzPad")
