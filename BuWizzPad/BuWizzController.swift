@@ -5,8 +5,16 @@ import Combine
 
 enum BuWizzSpec {
     static let serviceUUID = CBUUID(string: "936E67B1-1999-B388-8144-FB74D1920550")
-    static let appCharUUID = CBUUID(string: "00002901-0000-1000-8000-00805F9B34FB")
+    static let appCharShort = CBUUID(string: "2901")
+    static let appCharLong = CBUUID(string: "00002901-0000-1000-8000-00805F9B34FB")
     static let cmdSetMotor: UInt8 = 0x30
+}
+
+struct DiscoveredBuWizz: Identifiable {
+    let id: UUID
+    let peripheral: CBPeripheral
+    let name: String
+    let rssi: Int
 }
 
 struct SteerProfile: Codable, Equatable {
@@ -45,11 +53,12 @@ final class BuWizzController: NSObject, ObservableObject {
     @Published var stickX: Double = 0.0
     @Published var stickY: Double = 0.0
     @Published var lastFrameHex = "--"
+    @Published var discoveredDevices: [DiscoveredBuWizz] = []
+    @Published var logs: [String] = []
     @Published var profile = SteerProfile() {
         didSet { saveProfile() }
     }
 
-    // Domyślnie kanał 0 = skręt, kanał 1 = gaz (do zmiany w razie potrzeby)
     @Published var steerChannel = 0
     @Published var driveChannel = 1
     @Published var brakeMask: UInt8 = 0x00
@@ -60,6 +69,7 @@ final class BuWizzController: NSObject, ObservableObject {
     private var targetPeripheral: CBPeripheral?
     private var txCharacteristic: CBCharacteristic?
     private var loopTimer: Timer?
+    private var seenPeripherals: [UUID: CBPeripheral] = [:]
 
     override init() {
         super.init()
@@ -73,18 +83,45 @@ final class BuWizzController: NSObject, ObservableObject {
         loopTimer?.invalidate()
     }
 
+    private func log(_ msg: String) {
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        logs.insert("[\(stamp)] \(msg)", at: 0)
+        if logs.count > 40 {
+            logs.removeLast()
+        }
+    }
+
     func scanAndConnect() {
         guard central.state == .poweredOn else {
-            connectionState = "Włącz Bluetooth na iPhonie"
+            connectionState = "Bluetooth niegotowy (stan: \(central.state.rawValue))"
+            log("BT state: \(central.state.rawValue)")
             return
         }
-        connectionState = "Szukam BuWizz3..."
-        central.scanForPeripherals(withServices: [BuWizzSpec.serviceUUID], options: nil)
+        discoveredDevices.removeAll()
+        seenPeripherals.removeAll()
+        connectionState = "Skanuję BLE..."
+        log("Start skanowania (wszystkie urządzenia)")
+        central.stopScan()
+        central.scanForPeripherals(
+            withServices: nil,
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
+    }
+
+    func connect(to item: DiscoveredBuWizz) {
+        central.stopScan()
+        targetPeripheral = item.peripheral
+        item.peripheral.delegate = self
+        connectionState = "Łączę z \(item.name)..."
+        log("Łączenie z \(item.name) (\(item.id.uuidString.prefix(6)))")
+        central.connect(item.peripheral, options: nil)
     }
 
     func disconnect() {
         stopMotorsNow()
+        central.stopScan()
         if let p = targetPeripheral {
+            log("Rozłączanie z \(p.name ?? "BuWizz3")")
             central.cancelPeripheralConnection(p)
         }
     }
@@ -124,6 +161,7 @@ final class BuWizzController: NSObject, ObservableObject {
             queue: .main
         ) { [weak self] _ in
             self?.updatePadFlag()
+            self?.log("Pad podłączony")
         }
         NotificationCenter.default.addObserver(
             forName: .GCControllerDidDisconnect,
@@ -134,6 +172,7 @@ final class BuWizzController: NSObject, ObservableObject {
             self?.stickX = 0
             self?.stickY = 0
             self?.stopMotorsNow()
+            self?.log("Pad rozłączony")
         }
     }
 
@@ -201,12 +240,18 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
-            connectionState = "Gotowy (BT włączony)"
+            connectionState = "Bluetooth gotowy"
+            log("BT poweredOn")
         case .poweredOff:
             connectionState = "Bluetooth wyłączony"
             isConnected = false
+            log("BT poweredOff")
+        case .unauthorized:
+            connectionState = "Brak uprawnień Bluetooth"
+            log("BT unauthorized")
         default:
             connectionState = "Status BT: \(central.state.rawValue)"
+            log("BT status: \(central.state.rawValue)")
         }
     }
 
@@ -216,16 +261,39 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
-        central.stopScan()
-        targetPeripheral = peripheral
-        peripheral.delegate = self
-        connectionState = "Łączę z \(peripheral.name ?? "BuWizz3")..."
-        central.connect(peripheral, options: nil)
+        seenPeripherals[peripheral.identifier] = peripheral
+        let advName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
+        let name = advName ?? peripheral.name ?? "Nieznane BLE"
+        let rssiInt = RSSI.intValue
+
+        let advUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
+        let looksLikeBuWizz = name.localizedCaseInsensitiveContains("buwizz")
+            || advUUIDs.contains(BuWizzSpec.serviceUUID)
+
+        let entry = DiscoveredBuWizz(
+            id: peripheral.identifier,
+            peripheral: peripheral,
+            name: name,
+            rssi: rssiInt
+        )
+
+        if let idx = discoveredDevices.firstIndex(where: { $0.id == entry.id }) {
+            discoveredDevices[idx] = entry
+        } else {
+            discoveredDevices.append(entry)
+            log("Wykryto: \(name) (\(rssiInt) dBm)")
+        }
+
+        // Auto-łączenie, jeśli wygląda na BuWizz3 i jeszcze nie łączymy się z niczym
+        if looksLikeBuWizz && targetPeripheral == nil && !isConnected {
+            connect(to: entry)
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        connectionState = "Pobieram usługi..."
-        peripheral.discoverServices([BuWizzSpec.serviceUUID])
+        connectionState = "Połączono – szukam usług..."
+        log("didConnect: \(peripheral.name ?? "BLE")")
+        peripheral.discoverServices(nil)
     }
 
     func centralManager(
@@ -234,7 +302,9 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         error: Error?
     ) {
         isConnected = false
+        targetPeripheral = nil
         connectionState = "Błąd połączenia"
+        log("didFailToConnect: \(error?.localizedDescription ?? "brak")")
     }
 
     func centralManager(
@@ -244,16 +314,27 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
     ) {
         isConnected = false
         txCharacteristic = nil
+        targetPeripheral = nil
         connectionState = "Rozłączono"
+        log("didDisconnect: \(error?.localizedDescription ?? "zakończono")")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard error == nil,
-              let svc = peripheral.services?.first(where: { $0.uuid == BuWizzSpec.serviceUUID }) else {
-            connectionState = "Brak usługi BuWizz3"
+        if let error = error {
+            connectionState = "Błąd usług BLE"
+            log("Błąd usług: \(error.localizedDescription)")
             return
         }
-        peripheral.discoverCharacteristics([BuWizzSpec.appCharUUID], for: svc)
+        guard let services = peripheral.services, !services.isEmpty else {
+            connectionState = "Brak usług BLE"
+            log("Brak usług")
+            return
+        }
+
+        for svc in services {
+            log("Usługa: \(svc.uuid.uuidString)")
+            peripheral.discoverCharacteristics(nil, for: svc)
+        }
     }
 
     func peripheral(
@@ -261,16 +342,26 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         didDiscoverCharacteristicsFor service: CBService,
         error: Error?
     ) {
-        guard error == nil,
-              let ch = service.characteristics?.first(where: { $0.uuid == BuWizzSpec.appCharUUID }) else {
-            connectionState = "Brak charakterystyki 2901"
+        if let error = error {
+            log("Błąd char (\(service.uuid.uuidString)): \(error.localizedDescription)")
             return
         }
-        txCharacteristic = ch
-        if ch.properties.contains(.notify) {
-            peripheral.setNotifyValue(true, for: ch)
+        guard let chars = service.characteristics else { return }
+
+        for ch in chars {
+            log("Char \(ch.uuid.uuidString) props=\(ch.properties.rawValue)")
+            let isAppChar = ch.uuid == BuWizzSpec.appCharShort || ch.uuid == BuWizzSpec.appCharLong
+            let canWrite = ch.properties.contains(.write) || ch.properties.contains(.writeWithoutResponse)
+
+            if isAppChar && canWrite {
+                txCharacteristic = ch
+                if ch.properties.contains(.notify) {
+                    peripheral.setNotifyValue(true, for: ch)
+                }
+                isConnected = true
+                connectionState = "Gotowy: \(peripheral.name ?? "BuWizz3")"
+                log("Wybrano charakterystykę sterującą: \(ch.uuid.uuidString)")
+            }
         }
-        isConnected = true
-        connectionState = "Połączono z \(peripheral.name ?? "BuWizz3")"
     }
 }
