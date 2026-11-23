@@ -21,7 +21,8 @@ jobs:
 
       - name: Build iOS app without signing
         run: |
-          set -o pipefail
+          set -euo pipefail
+          mkdir -p build
           xcodebuild \
             -project "BuWizzPad.xcodeproj" \
             -scheme "BuWizzPad" \
@@ -32,12 +33,14 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=NO \
-            clean build | xcbeautify || true
+            clean build | xcbeautify
 
       - name: Create unsigned IPA artifact
         run: |
+          set -euo pipefail
           mkdir -p build/Payload
           APP_DIR=$(find build/DerivedData/Build/Products/Release-iphoneos -name "*.app" -maxdepth 1 | head -n 1)
+          test -n "$APP_DIR"
           cp -R "$APP_DIR" build/Payload/
           cd build && zip -r -y BuWizzPad-unsigned.ipa Payload
 
