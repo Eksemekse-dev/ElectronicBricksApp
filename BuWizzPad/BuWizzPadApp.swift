@@ -56,66 +56,36 @@ struct MainDriveView: View {
                     }
                 }
 
-                Section("Serwo PU Pozycja (0x50 + 0x52) i Auto-kalibracja") {
+                Section("Serwo PU Pozycja (punkt 0 po połączeniu)") {
                     Picker("Port serwa", selection: $ctrl.servoPortIndex) {
                         ForEach(0..<6, id: \.self) { idx in
                             Text("Port \(idx + 1)").tag(idx)
                         }
                     }
 
-                    LabeledContent("Tryb serwa", value: "PU Pozycja (0x50 + 0x52)")
-                    LabeledContent("Pozycja serwa", value: "\(ctrl.servoAngleDegPreview)°")
+                    LabeledContent("Punkt 0 po połączeniu", value: "\(ctrl.initialServoZeroAngleDeg)°")
+                    LabeledContent("Aktualna pozycja", value: "\(ctrl.servoAngleDegPreview)°")
+
+                    Button("Ustaw obecne jako 0") {
+                        ctrl.recaptureCurrentServoAsZero()
+                    }
+                    .buttonStyle(.bordered)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(String(format: "Martwa strefa (powrót do 0.0): %.0f%%", ctrl.deadzone * 100))
+                        Text(String(format: "Martwa strefa (powrót do 0): %.0f%%", ctrl.deadzone * 100))
                             .font(.caption.monospacedDigit())
                         Slider(value: $ctrl.deadzone, in: 0.0...0.35, step: 0.02)
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(String(format: "Zakres kąta PU: ±%.0f°", ctrl.servoCal.maxAngleDegrees))
+                        Text(String(format: "Zakres kąta PU: ±%.0f°", ctrl.maxAngleDegrees))
                             .font(.caption.monospacedDigit())
-                        Slider(value: $ctrl.servoCal.maxAngleDegrees, in: 30...180, step: 5)
+                        Slider(value: $ctrl.maxAngleDegrees, in: 30...180, step: 5)
                     }
 
-                    Text(ctrl.calibrationStatus)
-                        .font(.footnote.bold())
-
-                    Text(String(
-                        format: "Lewo: %.2f | Środek: 0.00 | Prawo: %+.2f",
-                        ctrl.servoCal.leftLimit,
-                        ctrl.servoCal.rightLimit
-                    ))
-                    .font(.footnote.monospacedDigit())
-
-                    HStack {
-                        if ctrl.autoCalibrating {
-                            Button("Złap Lewo") {
-                                ctrl.captureCurrentSweepLeft()
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button("Złap Prawo") {
-                                ctrl.captureCurrentSweepRight()
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button("Anuluj", role: .destructive) {
-                                ctrl.cancelAutoServoCalibration()
-                            }
-                            .buttonStyle(.bordered)
-                        } else {
-                            Button("Auto-kalibracja") {
-                                ctrl.startAutoServoCalibration()
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button("Reset") {
-                                ctrl.resetServoCalibration()
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
+                    Text("Po połączeniu apka wyznacza początkową pozycję jako 0 i po każdym skręcie wraca do tej pozycji.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Porty (1–6), tryby i limit mocy") {
@@ -125,7 +95,7 @@ struct MainDriveView: View {
                                 Text(port.title)
                                     .font(.headline)
                                 if port.portIndex == ctrl.servoPortIndex {
-                                    Text("PU SERWO -> 0.0")
+                                    Text("PU SERWO -> 0")
                                         .font(.caption2.bold())
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)
