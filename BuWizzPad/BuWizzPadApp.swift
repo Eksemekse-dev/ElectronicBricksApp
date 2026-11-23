@@ -56,28 +56,66 @@ struct MainDriveView: View {
                     }
                 }
 
-                Section("Port serwa (powrót do 0.0)") {
+                Section("Serwo PU Pozycja (0x50 + 0x52) i Auto-kalibracja") {
                     Picker("Port serwa", selection: $ctrl.servoPortIndex) {
                         ForEach(0..<6, id: \.self) { idx in
                             Text("Port \(idx + 1)").tag(idx)
                         }
                     }
 
-                    Picker("Tryb serwa", selection: $ctrl.servoProtocolMode) {
-                        ForEach(ServoProtocolMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
+                    LabeledContent("Tryb serwa", value: "PU Pozycja (0x50 + 0x52)")
+                    LabeledContent("Pozycja serwa", value: "\(ctrl.servoAngleDegPreview)°")
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(String(format: "Martwa strefa (powrót do 0.0): %.0f%%", ctrl.deadzone * 100))
                             .font(.caption.monospacedDigit())
-                        Slider(value: $ctrl.deadzone, in: 0.0...0.3, step: 0.02)
+                        Slider(value: $ctrl.deadzone, in: 0.0...0.35, step: 0.02)
                     }
 
-                    Text("Po puszczeniu skrętu port serwa wraca bezpośrednio do 0.0.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(format: "Zakres kąta PU: ±%.0f°", ctrl.servoCal.maxAngleDegrees))
+                            .font(.caption.monospacedDigit())
+                        Slider(value: $ctrl.servoCal.maxAngleDegrees, in: 30...180, step: 5)
+                    }
+
+                    Text(ctrl.calibrationStatus)
+                        .font(.footnote.bold())
+
+                    Text(String(
+                        format: "Lewo: %.2f | Środek: 0.00 | Prawo: %+.2f",
+                        ctrl.servoCal.leftLimit,
+                        ctrl.servoCal.rightLimit
+                    ))
+                    .font(.footnote.monospacedDigit())
+
+                    HStack {
+                        if ctrl.autoCalibrating {
+                            Button("Złap Lewo") {
+                                ctrl.captureCurrentSweepLeft()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Złap Prawo") {
+                                ctrl.captureCurrentSweepRight()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Anuluj", role: .destructive) {
+                                ctrl.cancelAutoServoCalibration()
+                            }
+                            .buttonStyle(.bordered)
+                        } else {
+                            Button("Auto-kalibracja") {
+                                ctrl.startAutoServoCalibration()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Reset") {
+                                ctrl.resetServoCalibration()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                 }
 
                 Section("Porty (1–6), tryby i limit mocy") {
@@ -87,7 +125,7 @@ struct MainDriveView: View {
                                 Text(port.title)
                                     .font(.headline)
                                 if port.portIndex == ctrl.servoPortIndex {
-                                    Text("SERWO -> 0.0")
+                                    Text("PU SERWO -> 0.0")
                                         .font(.caption2.bold())
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)
