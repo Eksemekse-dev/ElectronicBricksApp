@@ -172,7 +172,7 @@ final class BuWizzController: NSObject, ObservableObject {
     private var smoothedServoValue: Double = 0.0
     private var pulsePhase: Double = 0.0
     private var blinkCounter: Int = 0
-    private var prevTriggerPressed: [Int: Bool] = Array(repeating: false, count: 6)
+    private var prevTriggerPressed: [Bool] = Array(repeating: false, count: 6)
 
     override init() {
         super.init()
@@ -453,7 +453,6 @@ final class BuWizzController: NSObject, ObservableObject {
     }
 
     private func startControlLoop() {
-        // Co 25 ms (~40 Hz); co 16 cykli (~400 ms) przełączamy stan mignięcia kierunkowskazu (~1.25 Hz)
         loopTimer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.pulsePhase += 0.14
@@ -465,7 +464,7 @@ final class BuWizzController: NSObject, ObservableObject {
         }
     }
 
-    // Dioda na padzie PS4: kolor odpowiada naładowaniu baterii; gdy ładuje się, pulsuje TYM SAMYM kolorem
+    // Dioda na padzie PS4: kolor odpowiada naładowaniu baterii; gdy ładuje się, pulsuje tym samym kolorem
     private func updatePadLight() {
         let controllers = GCController.controllers()
         padLightSupported = controllers.contains { $0.light != nil }
@@ -575,10 +574,9 @@ final class BuWizzController: NSObject, ObservableObject {
         let idx = port.portIndex
         guard (0..<6).contains(idx) else { return }
         let pressedNow = abs(rawValue) > 0.5
-        let wasPressed = prevTriggerPressed[idx] ?? false
+        let wasPressed = prevTriggerPressed[idx]
         prevTriggerPressed[idx] = pressedNow
 
-        // Przełączamy stan przy świeżym wciśnięciu przycisku / wychyleniu
         if pressedNow && !wasPressed {
             switch port.mode {
             case .frontLight:
@@ -637,7 +635,6 @@ final class BuWizzController: NSObject, ObservableObject {
                 }
 
             case .frontLight:
-                // Stały prąd na porcie dopóki nie klikniesz ponownie
                 if lightLatched[port.portIndex] {
                     let sign: Double = port.invert ? -1.0 : 1.0
                     channelBytes[port.portIndex] = doubleToInt8(sign * powerRatio)
@@ -646,7 +643,6 @@ final class BuWizzController: NSObject, ObservableObject {
                 }
 
             case .indicator:
-                // Miga dopóki nie klikniesz ponownie
                 if indicatorLatched[port.portIndex] && blinkOn {
                     let sign: Double = port.invert ? -1.0 : 1.0
                     channelBytes[port.portIndex] = doubleToInt8(sign * powerRatio)
