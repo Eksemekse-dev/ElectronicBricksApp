@@ -1,0 +1,21 @@
+name: BuWizzPad
+options:
+  bundleIdPrefix: com.kacper.buwizzpad
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  BuWizzPad:
+    type: application
+    platform: iOS
+    sources:
+      - path: BuWizzPad
+    info:
+      path: BuWizzPad/Info.plist
+      properties:
+        CFBundleDisplayName: BuWizzPad
+        UILaunchScreen: {}
+        NSBluetoothAlwaysUsageDescription: Aplikacja łączy się z modułem BuWizz3 przez Bluetooth Low Energy.
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"
