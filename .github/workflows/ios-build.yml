@@ -1,0 +1,48 @@
+name: Build BuWizzPad (GitHub Only)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build iOS app without signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "BuWizzPad.xcodeproj" \
+            -scheme "BuWizzPad" \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            clean build | xcbeautify || true
+
+      - name: Create unsigned IPA artifact
+        run: |
+          mkdir -p build/Payload
+          APP_DIR=$(find build/DerivedData/Build/Products/Release-iphoneos -name "*.app" -maxdepth 1 | head -n 1)
+          cp -R "$APP_DIR" build/Payload/
+          cd build && zip -r -y BuWizzPad-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BuWizzPad-unsigned-ipa
+          path: build/BuWizzPad-unsigned.ipa
