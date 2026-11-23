@@ -192,7 +192,7 @@ final class BuWizzController: NSObject, ObservableObject {
         lastFrameHex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
 
         let writeType: CBCharacteristicWriteType =
-            char.properties.contains(.withoutResponse) ? .withoutResponse : .withResponse
+            char.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
         peripheral.writeValue(payload, for: char, type: writeType)
     }
 }
