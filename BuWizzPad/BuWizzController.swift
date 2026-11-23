@@ -69,6 +69,7 @@ final class BuWizzController: NSObject, ObservableObject {
     private var targetPeripheral: CBPeripheral?
     private var txCharacteristic: CBCharacteristic?
     private var loopTimer: Timer?
+    private var serviceTimeoutTimer: Timer?
     private var seenPeripherals: [UUID: CBPeripheral] = [:]
 
     override init() {
@@ -81,12 +82,13 @@ final class BuWizzController: NSObject, ObservableObject {
 
     deinit {
         loopTimer?.invalidate()
+        serviceTimeoutTimer?.invalidate()
     }
 
     private func log(_ msg: String) {
         let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         logs.insert("[\(stamp)] \(msg)", at: 0)
-        if logs.count > 40 {
+        if logs.count > 50 {
             logs.removeLast()
         }
     }
@@ -97,10 +99,14 @@ final class BuWizzController: NSObject, ObservableObject {
             log("BT state: \(central.state.rawValue)")
             return
         }
+        serviceTimeoutTimer?.invalidate()
+        isConnected = false
+        txCharacteristic = nil
+        targetPeripheral = nil
         discoveredDevices.removeAll()
         seenPeripherals.removeAll()
         connectionState = "Skanuję BLE..."
-        log("Start skanowania (wszystkie urządzenia)")
+        log("Start skanowania BLE")
         central.stopScan()
         central.scanForPeripherals(
             withServices: nil,
@@ -108,16 +114,39 @@ final class BuWizzController: NSObject, ObservableObject {
         )
     }
 
+    func retryDiscoverServices() {
+        guard let p = targetPeripheral, p.state == .connected else {
+            log("Brak aktywnego połączenia do ponowienia usług")
+            return
+        }
+        startServiceDiscovery(for: p)
+    }
+
+    private func startServiceDiscovery(for peripheral: CBPeripheral) {
+        serviceTimeoutTimer?.invalidate()
+        connectionState = "Połączono – szukam usług..."
+        log("discoverServices(nil) dla \(peripheral.name ?? "BLE")")
+        peripheral.delegate = self
+        peripheral.discoverServices(nil)
+
+        serviceTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+            guard let self = self, !self.isConnected else { return }
+            self.connectionState = "Timeout szukania usług"
+            self.log("Brak odpowiedzi discoverServices po 3s (state=\(peripheral.state.rawValue))")
+        }
+    }
+
     func connect(to item: DiscoveredBuWizz) {
         central.stopScan()
         targetPeripheral = item.peripheral
         item.peripheral.delegate = self
         connectionState = "Łączę z \(item.name)..."
-        log("Łączenie z \(item.name) (\(item.id.uuidString.prefix(6)))")
+        log("Łączenie z \(item.name)")
         central.connect(item.peripheral, options: nil)
     }
 
     func disconnect() {
+        serviceTimeoutTimer?.invalidate()
         stopMotorsNow()
         central.stopScan()
         if let p = targetPeripheral {
@@ -284,16 +313,14 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
             log("Wykryto: \(name) (\(rssiInt) dBm)")
         }
 
-        // Auto-łączenie, jeśli wygląda na BuWizz3 i jeszcze nie łączymy się z niczym
         if looksLikeBuWizz && targetPeripheral == nil && !isConnected {
             connect(to: entry)
         }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        connectionState = "Połączono – szukam usług..."
         log("didConnect: \(peripheral.name ?? "BLE")")
-        peripheral.discoverServices(nil)
+        startServiceDiscovery(for: peripheral)
     }
 
     func centralManager(
@@ -301,6 +328,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
+        serviceTimeoutTimer?.invalidate()
         isConnected = false
         targetPeripheral = nil
         connectionState = "Błąd połączenia"
@@ -312,6 +340,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
+        serviceTimeoutTimer?.invalidate()
         isConnected = false
         txCharacteristic = nil
         targetPeripheral = nil
@@ -320,6 +349,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        serviceTimeoutTimer?.invalidate()
         if let error = error {
             connectionState = "Błąd usług BLE"
             log("Błąd usług: \(error.localizedDescription)")
@@ -331,6 +361,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
 
+        log("Znaleziono usług: \(services.count)")
         for svc in services {
             log("Usługa: \(svc.uuid.uuidString)")
             peripheral.discoverCharacteristics(nil, for: svc)
@@ -360,7 +391,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
                 }
                 isConnected = true
                 connectionState = "Gotowy: \(peripheral.name ?? "BuWizz3")"
-                log("Wybrano charakterystykę sterującą: \(ch.uuid.uuidString)")
+                log("Wybrano char: \(ch.uuid.uuidString)")
             }
         }
     }
