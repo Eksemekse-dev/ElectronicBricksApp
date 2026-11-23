@@ -9,6 +9,8 @@ enum BuWizzSpec {
     static let appCharShort = CBUUID(string: "2901")
     static let appCharLong = CBUUID(string: "00002901-0000-1000-8000-00805F9B34FB")
     static let cmdSetMotor: UInt8 = 0x30
+    static let cmdSetPUPortFunction: UInt8 = 0x50
+    static let cmdSetServoRef: UInt8 = 0x52
 }
 
 enum PadInputSource: String, CaseIterable, Identifiable, Codable {
@@ -37,12 +39,28 @@ enum PortOperatingMode: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
 }
 
+enum ServoProtocolMode: String, CaseIterable, Identifiable, Codable {
+    case pwm0x30 = "PWM 0x30 (-127..127)"
+    case puPosition0x50 = "PU Pozycja (0x50 + 0x52)"
+    case puSpeed0x50 = "PU Prędkość (0x50 + 0x52)"
+
+    var id: String { rawValue }
+}
+
+enum AutoCalPhase: String {
+    case idle = "Gotowy"
+    case sweepingLeft = "Ruch w lewo – kliknij 'Złap Lewo' na oporze"
+    case centering = "Powrót na środek..."
+    case sweepingRight = "Ruch w prawo – kliknij 'Złap Prawo' na oporze"
+    case finished = "Zakończono kalibrację"
+}
+
 struct PortAssignment: Identifiable, Codable, Equatable {
-    var id: Int { portIndex } // 0...5 -> Porty 1...6
+    var id: Int { portIndex }
     let portIndex: Int
     var source: PadInputSource
     var mode: PortOperatingMode
-    var powerLimitPercent: Double // 0...100%
+    var powerLimitPercent: Double
     var invert: Bool
     var isServo: Bool
 
@@ -50,23 +68,22 @@ struct PortAssignment: Identifiable, Codable, Equatable {
 }
 
 struct SteerProfile: Codable, Equatable {
-    var leftLimit: Double = -0.75
+    var leftLimit: Double = -1.0
     var centerOffset: Double = 0.0
-    var rightLimit: Double = 0.75
+    var rightLimit: Double = 1.0
     var deadzone: Double = 0.08
-    var returnToCenterSmoothing: Double = 0.35
+    var returnToCenterSmoothing: Double = 0.45
 
-    func computeSteeringByte(
+    func computeSteeringValue(
         stickValue: Double,
         currentSmoothed: inout Double,
         maxPowerRatio: Double
-    ) -> Int8 {
+    ) -> Double {
         let v = max(-1.0, min(1.0, stickValue))
         let effectiveMax = max(0.0, min(1.0, maxPowerRatio))
-
-        let desiredTarget: Double
         let isCenteredInput = abs(v) < deadzone
 
+        let desiredTarget: Double
         if isCenteredInput {
             desiredTarget = centerOffset
         } else if v < 0 {
@@ -78,22 +95,16 @@ struct SteerProfile: Codable, Equatable {
         }
 
         if isCenteredInput {
-            let alpha = max(0.05, min(1.0, returnToCenterSmoothing))
+            let alpha = max(0.10, min(1.0, returnToCenterSmoothing))
             currentSmoothed += (desiredTarget - currentSmoothed) * alpha
-            if abs(currentSmoothed - centerOffset) < 0.015 {
+            if abs(currentSmoothed - centerOffset) < 0.02 {
                 currentSmoothed = centerOffset
             }
         } else {
-            let activeAlpha = 0.75
-            currentSmoothed += (desiredTarget - currentSmoothed) * activeAlpha
+            currentSmoothed += (desiredTarget - currentSmoothed) * 0.85
         }
 
-        return toInt8(currentSmoothed * effectiveMax)
-    }
-
-    private func toInt8(_ v: Double) -> Int8 {
-        let clamped = max(-1.0, min(1.0, v))
-        return Int8((clamped * 127.0).rounded())
+        return max(-1.0, min(1.0, currentSmoothed * effectiveMax))
     }
 }
 
@@ -119,8 +130,8 @@ final class BuWizzController: NSObject, ObservableObject {
     @Published var batteryLevelCode: Int? = nil
     @Published var isCharging: Bool = false
     @Published var lastFrameHex = "--"
+    @Published var channelValuesPreview: [Int] = Array(repeating: 0, count: 6)
 
-    // Stan przełączników toggle dla trybów Światło przednie i Kierunkowskazy na portach 0...5
     @Published var lightLatched: [Bool] = Array(repeating: false, count: 6)
     @Published var indicatorLatched: [Bool] = Array(repeating: false, count: 6)
 
@@ -130,12 +141,22 @@ final class BuWizzController: NSObject, ObservableObject {
     @Published var servoPortIndex: Int = 0 {
         didSet {
             syncServoPortFlags()
+            applyServoProtocolModeIfConnected()
+            saveConfig()
+        }
+    }
+
+    @Published var servoProtocolMode: ServoProtocolMode = .pwm0x30 {
+        didSet {
+            applyServoProtocolModeIfConnected()
             saveConfig()
         }
     }
 
     @Published var autoCalibrating = false
-    @Published var calibrationStatus = "Gotowy"
+    @Published var autoCalPhase: AutoCalPhase = .idle
+    @Published var liveSweepValue: Double = 0.0
+    @Published var calibrationStatus = "Gotowy (pełny zakres -1.00 .. +1.00)"
 
     @Published var profile = SteerProfile() {
         didSet { saveConfig() }
@@ -157,22 +178,27 @@ final class BuWizzController: NSObject, ObservableObject {
 
     private struct SavedConfig: Codable {
         var servoPortIndex: Int
+        var servoProtocolMode: ServoProtocolMode?
         var profile: SteerProfile
         var ports: [PortAssignment]
     }
 
-    private let configKey = "BuWizzPad.Config.v4"
+    private let configKey = "BuWizzPad.Config.v6"
     private var central: CBCentralManager!
     private var targetPeripheral: CBPeripheral?
     private var txCharacteristic: CBCharacteristic?
     private var loopTimer: Timer?
     private var serviceTimeoutTimer: Timer?
     private var calibrationTask: Task<Void, Never>?
-    private var overridePortValues: [Int: Int8] = [:]
+    private var overridePortNormalized: [Int: Double] = [:]
     private var smoothedServoValue: Double = 0.0
     private var pulsePhase: Double = 0.0
     private var blinkCounter: Int = 0
     private var prevTriggerPressed: [Bool] = Array(repeating: false, count: 6)
+
+    // Flagi do ręcznego złapania aktualnego wychylenia podczas auto-skanowania
+    private var capturedLeftDuringSweep: Double? = nil
+    private var capturedRightDuringSweep: Double? = nil
 
     override init() {
         super.init()
@@ -215,7 +241,41 @@ final class BuWizzController: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Kalibracja ręczna i automatyczna serwa
+    // MARK: - Tryb portu serwa w BuWizz3 API v3.6 (0x50)
+
+    func applyServoProtocolModeIfConnected() {
+        guard isConnected, servoPortIndex < 4 else { return }
+        var functions: [UInt8] = [0x10, 0x10, 0x10, 0x10]
+        switch servoProtocolMode {
+        case .pwm0x30:
+            functions[servoPortIndex] = 0x10
+        case .puPosition0x50:
+            functions[servoPortIndex] = 0x15
+        case .puSpeed0x50:
+            functions[servoPortIndex] = 0x14
+        }
+        let cmd: [UInt8] = [BuWizzSpec.cmdSetPUPortFunction] + functions
+        sendRawBytes(cmd)
+        log("Wysłano 0x50 tryb \(servoProtocolMode.rawValue) dla Portu \(servoPortIndex + 1)")
+    }
+
+    // MARK: - Kalibracja ręczna, korekta krokowa i automatyczna
+
+    func nudgeLeftLimit(by delta: Double) {
+        profile.leftLimit = max(-1.0, min(0.0, profile.leftLimit + delta))
+        calibrationStatus = String(format: "Lewo: %.2f", profile.leftLimit)
+    }
+
+    func nudgeCenter(by delta: Double) {
+        profile.centerOffset = max(-1.0, min(1.0, profile.centerOffset + delta))
+        smoothedServoValue = profile.centerOffset
+        calibrationStatus = String(format: "Środek: %.2f", profile.centerOffset)
+    }
+
+    func nudgeRightLimit(by delta: Double) {
+        profile.rightLimit = max(0.0, min(1.0, profile.rightLimit + delta))
+        calibrationStatus = String(format: "Prawo: %.2f", profile.rightLimit)
+    }
 
     func setLeftLimitFromCurrentServoStick() {
         let val = currentServoSourceRawValue()
@@ -239,74 +299,110 @@ final class BuWizzController: NSObject, ObservableObject {
     func resetProfile() {
         profile = SteerProfile()
         smoothedServoValue = profile.centerOffset
-        calibrationStatus = "Przywrócono domyślny profil"
+        calibrationStatus = "Reset: Lewo -1.00 | Środek 0.00 | Prawo +1.00"
+    }
+
+    func captureCurrentSweepLeft() {
+        let chosen = min(-0.05, liveSweepValue)
+        capturedLeftDuringSweep = chosen
+        profile.leftLimit = max(-1.0, min(0.0, chosen))
+        calibrationStatus = String(format: "Złapano Lewo: %.2f", profile.leftLimit)
+        log(String(format: "Złapano Lewo na oporze: %.2f", profile.leftLimit))
+    }
+
+    func captureCurrentSweepRight() {
+        let chosen = max(0.05, liveSweepValue)
+        capturedRightDuringSweep = chosen
+        profile.rightLimit = max(0.0, min(1.0, chosen))
+        calibrationStatus = String(format: "Złapano Prawo: %.2f", profile.rightLimit)
+        log(String(format: "Złapano Prawo na oporze: %.2f", profile.rightLimit))
     }
 
     func startAutoServoCalibration() {
         guard !autoCalibrating else { return }
         calibrationTask?.cancel()
+        capturedLeftDuringSweep = nil
+        capturedRightDuringSweep = nil
         autoCalibrating = true
-        calibrationStatus = "Auto-kalibracja: ruch w lewo..."
+        autoCalPhase = .sweepingLeft
+        liveSweepValue = 0.0
+        calibrationStatus = AutoCalPhase.sweepingLeft.rawValue
         log("Start auto-kalibracji serwa na Porcie \(servoPortIndex + 1)")
 
         let targetPort = servoPortIndex
-        let servoLimitRatio = max(0.15, min(0.85, (ports.indices.contains(targetPort) ? ports[targetPort].powerLimitPercent : 60.0) / 100.0))
+        let configuredLimit = ports.indices.contains(targetPort) ? (ports[targetPort].powerLimitPercent / 100.0) : 1.0
+        let sweepMax = max(0.35, min(1.0, configuredLimit > 0 ? configuredLimit : 1.0))
 
         calibrationTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             defer {
-                self.overridePortValues.removeValue(forKey: targetPort)
+                self.overridePortNormalized.removeValue(forKey: targetPort)
                 self.smoothedServoValue = self.profile.centerOffset
+                self.liveSweepValue = self.profile.centerOffset
                 self.autoCalibrating = false
+                if self.autoCalPhase != .finished {
+                    self.autoCalPhase = .idle
+                }
             }
 
-            let steps = 16
+            // 1. Płynny przejazd w lewo do sweepMax (możesz kliknąć "Złap Lewo" w dowolnym momencie)
+            let steps = 20
             for step in 1...steps {
                 if Task.isCancelled { return }
+                if self.capturedLeftDuringSweep != nil { break }
                 let frac = Double(step) / Double(steps)
-                let cmdVal = -frac * servoLimitRatio
-                self.overridePortValues[targetPort] = self.doubleToInt8(cmdVal)
-                self.calibrationStatus = String(format: "Lewo: %.0f%%", frac * 100)
-                try? await Task.sleep(nanoseconds: 65_000_000)
+                let val = -frac * sweepMax
+                self.liveSweepValue = val
+                self.overridePortNormalized[targetPort] = val
+                self.calibrationStatus = String(format: "Lewo: %.2f (kliknij Złap Lewo)", val)
+                try? await Task.sleep(nanoseconds: 140_000_000)
             }
-            let foundLeft = -servoLimitRatio
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            let finalLeft = self.capturedLeftDuringSweep ?? self.liveSweepValue
+            self.profile.leftLimit = max(-1.0, min(0.0, finalLeft))
 
-            self.overridePortValues[targetPort] = self.doubleToInt8(self.profile.centerOffset)
+            // 2. Powrót na środek
+            self.autoCalPhase = .centering
+            self.liveSweepValue = self.profile.centerOffset
+            self.overridePortNormalized[targetPort] = self.profile.centerOffset
             self.calibrationStatus = "Powrót na środek..."
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            try? await Task.sleep(nanoseconds: 500_000_000)
 
+            // 3. Płynny przejazd w prawo do +sweepMax (możesz kliknąć "Złap Prawo" w dowolnym momencie)
+            self.autoCalPhase = .sweepingRight
             for step in 1...steps {
                 if Task.isCancelled { return }
+                if self.capturedRightDuringSweep != nil { break }
                 let frac = Double(step) / Double(steps)
-                let cmdVal = frac * servoLimitRatio
-                self.overridePortValues[targetPort] = self.doubleToInt8(cmdVal)
-                self.calibrationStatus = String(format: "Prawo: %.0f%%", frac * 100)
-                try? await Task.sleep(nanoseconds: 65_000_000)
+                let val = frac * sweepMax
+                self.liveSweepValue = val
+                self.overridePortNormalized[targetPort] = val
+                self.calibrationStatus = String(format: "Prawo: %+.2f (kliknij Złap Prawo)", val)
+                try? await Task.sleep(nanoseconds: 140_000_000)
             }
-            let foundRight = servoLimitRatio
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            let finalRight = self.capturedRightDuringSweep ?? self.liveSweepValue
+            self.profile.rightLimit = max(0.0, min(1.0, finalRight))
 
-            self.overridePortValues[targetPort] = self.doubleToInt8(self.profile.centerOffset)
-            self.profile.leftLimit = max(-1.0, min(0.0, foundLeft))
-            self.profile.centerOffset = 0.0
-            self.profile.rightLimit = max(0.0, min(1.0, foundRight))
-            self.smoothedServoValue = 0.0
+            // 4. Powrót na środek
+            self.overridePortNormalized[targetPort] = self.profile.centerOffset
+            self.smoothedServoValue = self.profile.centerOffset
+            self.autoCalPhase = .finished
             self.calibrationStatus = String(
-                format: "Gotowe! L: %.2f | C: %.2f | P: %.2f",
+                format: "Gotowe! L: %.2f | C: %.2f | P: %+.2f",
                 self.profile.leftLimit,
                 self.profile.centerOffset,
                 self.profile.rightLimit
             )
-            self.log("Zakończono auto-kalibrację serwa: L=\(self.profile.leftLimit), R=\(self.profile.rightLimit)")
+            self.log(String(format: "Auto-kalibracja zakończona: L=%.2f R=%.2f", self.profile.leftLimit, self.profile.rightLimit))
         }
     }
 
     func cancelAutoServoCalibration() {
         calibrationTask?.cancel()
-        overridePortValues.removeValue(forKey: servoPortIndex)
+        overridePortNormalized.removeValue(forKey: servoPortIndex)
         smoothedServoValue = profile.centerOffset
+        liveSweepValue = profile.centerOffset
         autoCalibrating = false
+        autoCalPhase = .idle
         calibrationStatus = "Anulowano kalibrację"
     }
 
@@ -391,6 +487,9 @@ final class BuWizzController: NSObject, ObservableObject {
             return
         }
         servoPortIndex = max(0, min(5, decoded.servoPortIndex))
+        if let mode = decoded.servoProtocolMode {
+            servoProtocolMode = mode
+        }
         profile = decoded.profile
         if decoded.ports.count == 6 {
             ports = decoded.ports
@@ -399,7 +498,12 @@ final class BuWizzController: NSObject, ObservableObject {
     }
 
     private func saveConfig() {
-        let cfg = SavedConfig(servoPortIndex: servoPortIndex, profile: profile, ports: ports)
+        let cfg = SavedConfig(
+            servoPortIndex: servoPortIndex,
+            servoProtocolMode: servoProtocolMode,
+            profile: profile,
+            ports: ports
+        )
         guard let encoded = try? JSONEncoder().encode(cfg) else { return }
         UserDefaults.standard.set(encoded, forKey: configKey)
     }
@@ -464,7 +568,6 @@ final class BuWizzController: NSObject, ObservableObject {
         }
     }
 
-    // Dioda na padzie PS4: kolor odpowiada naładowaniu baterii; gdy ładuje się, pulsuje tym samym kolorem
     private func updatePadLight() {
         let controllers = GCController.controllers()
         padLightSupported = controllers.contains { $0.light != nil }
@@ -475,13 +578,13 @@ final class BuWizzController: NSObject, ObservableObject {
         } else {
             let ratio = batteryNormalizedRatio()
             if ratio > 0.65 {
-                baseRGB = (0.0, 1.0, 0.15)      // zielony
+                baseRGB = (0.0, 1.0, 0.15)
             } else if ratio > 0.35 {
-                baseRGB = (1.0, 0.85, 0.0)     // żółty
+                baseRGB = (1.0, 0.85, 0.0)
             } else if ratio > 0.15 {
-                baseRGB = (1.0, 0.35, 0.0)     // pomarańczowy
+                baseRGB = (1.0, 0.35, 0.0)
             } else {
-                baseRGB = (1.0, 0.05, 0.05)    // czerwony
+                baseRGB = (1.0, 0.05, 0.05)
             }
         }
 
@@ -590,14 +693,14 @@ final class BuWizzController: NSObject, ObservableObject {
     }
 
     private func stopAllPortsNow() {
-        overridePortValues.removeAll()
+        overridePortNormalized.removeAll()
         smoothedServoValue = profile.centerOffset
         for i in 0..<6 {
             lightLatched[i] = false
             indicatorLatched[i] = false
             prevTriggerPressed[i] = false
         }
-        sendRawChannelBytes(Array(repeating: 0, count: 6))
+        sendMotorBytes0x30(Array(repeating: 0, count: 6))
     }
 
     private func transmitAllPorts() {
@@ -605,54 +708,83 @@ final class BuWizzController: NSObject, ObservableObject {
         let blinkOn = ((blinkCounter / 16) % 2) == 0
 
         for port in ports where (0..<6).contains(port.portIndex) {
-            if let forced = overridePortValues[port.portIndex] {
-                channelBytes[port.portIndex] = forced
+            let idx = port.portIndex
+            let rawInput = readSourceValue(port.source)
+            updateToggleTriggerForPort(port, rawValue: rawInput)
+
+            if let forcedNorm = overridePortNormalized[idx] {
+                channelBytes[idx] = doubleToInt8(forcedNorm)
                 continue
             }
 
-            var raw = readSourceValue(port.source)
-            updateToggleTriggerForPort(port, rawValue: raw)
-
+            var effectiveInput = rawInput
             if port.invert {
-                raw = -raw
+                effectiveInput = -effectiveInput
             }
 
             let powerRatio = max(0.0, min(1.0, port.powerLimitPercent / 100.0))
 
             switch port.mode {
             case .normal:
-                if port.portIndex == servoPortIndex || port.isServo {
-                    channelBytes[port.portIndex] = profile.computeSteeringByte(
-                        stickValue: raw,
+                if idx == servoPortIndex || port.isServo {
+                    let norm = profile.computeSteeringValue(
+                        stickValue: effectiveInput,
                         currentSmoothed: &smoothedServoValue,
                         maxPowerRatio: powerRatio
                     )
+                    channelBytes[idx] = doubleToInt8(norm)
+
+                    if servoProtocolMode != .pwm0x30 && idx < 4 {
+                        sendServoReference0x52(portIndex: idx, normalized: norm)
+                    }
                 } else {
-                    channelBytes[port.portIndex] = computeLinearMotorByte(
-                        rawValue: raw,
+                    channelBytes[idx] = computeLinearMotorByte(
+                        rawValue: effectiveInput,
                         powerRatio: powerRatio
                     )
                 }
 
             case .frontLight:
-                if lightLatched[port.portIndex] {
+                if lightLatched[idx] {
                     let sign: Double = port.invert ? -1.0 : 1.0
-                    channelBytes[port.portIndex] = doubleToInt8(sign * powerRatio)
+                    channelBytes[idx] = doubleToInt8(sign * powerRatio)
                 } else {
-                    channelBytes[port.portIndex] = 0
+                    channelBytes[idx] = 0
                 }
 
             case .indicator:
-                if indicatorLatched[port.portIndex] && blinkOn {
+                if indicatorLatched[idx] && blinkOn {
                     let sign: Double = port.invert ? -1.0 : 1.0
-                    channelBytes[port.portIndex] = doubleToInt8(sign * powerRatio)
+                    channelBytes[idx] = doubleToInt8(sign * powerRatio)
                 } else {
-                    channelBytes[port.portIndex] = 0
+                    channelBytes[idx] = 0
                 }
             }
         }
 
-        sendRawChannelBytes(channelBytes)
+        channelValuesPreview = channelBytes.map { Int($0) }
+        sendMotorBytes0x30(channelBytes)
+    }
+
+    private func sendServoReference0x52(portIndex: Int, normalized: Double) {
+        guard (0..<4).contains(portIndex) else { return }
+        var refs: [Int32] = [0, 0, 0, 0]
+        let refVal: Int32
+        if servoProtocolMode == .puPosition0x50 {
+            refVal = Int32((max(-1.0, min(1.0, normalized)) * 90.0).rounded())
+        } else {
+            refVal = Int32(doubleToInt8(normalized))
+        }
+        refs[portIndex] = refVal
+
+        var bytes: [UInt8] = [BuWizzSpec.cmdSetServoRef]
+        for r in refs {
+            var le = r.littleEndian
+            withUnsafeBytes(of: &le) { rawBuf in
+                bytes.append(contentsOf: rawBuf)
+            }
+        }
+        sendRawBytes(bytes)
     }
 
     private func computeLinearMotorByte(rawValue: Double, powerRatio: Double) -> Int8 {
@@ -660,8 +792,7 @@ final class BuWizzController: NSObject, ObservableObject {
         if abs(v) < profile.deadzone {
             return 0
         }
-        let scaled = v * powerRatio
-        return doubleToInt8(scaled)
+        return doubleToInt8(v * powerRatio)
     }
 
     private func doubleToInt8(_ value: Double) -> Int8 {
@@ -669,17 +800,22 @@ final class BuWizzController: NSObject, ObservableObject {
         return Int8((clamped * 127.0).rounded())
     }
 
-    private func sendRawChannelBytes(_ chValues: [Int8]) {
-        guard let peripheral = targetPeripheral,
-              let char = txCharacteristic else { return }
-
+    private func sendMotorBytes0x30(_ chValues: [Int8]) {
         var packet: [UInt8] = [BuWizzSpec.cmdSetMotor]
         packet.append(contentsOf: chValues.prefix(6).map { UInt8(bitPattern: $0) })
         packet.append(brakeMask)
         packet.append(lutMask)
+        sendRawBytes(packet, updateLastFrame: true)
+    }
 
-        let payload = Data(packet)
-        lastFrameHex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
+    private func sendRawBytes(_ bytes: [UInt8], updateLastFrame: Bool = false) {
+        guard let peripheral = targetPeripheral,
+              let char = txCharacteristic else { return }
+
+        let payload = Data(bytes)
+        if updateLastFrame {
+            lastFrameHex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
+        }
 
         let writeType: CBCharacteristicWriteType =
             char.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
@@ -823,6 +959,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
                 isConnected = true
                 connectionState = "Gotowy: \(peripheral.name ?? "BuWizz3")"
                 log("Wybrano char: \(ch.uuid.uuidString)")
+                applyServoProtocolModeIfConnected()
             }
         }
     }
