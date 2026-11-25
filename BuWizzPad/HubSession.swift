@@ -529,7 +529,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
     }
 
     private func sendRawBytes(_ bytes: [UInt8], updateLastFrame: Bool = false, preferResponse: Bool = false) {
-        guard let peripheral = targetPeripheral,
+        guard peripheral.state == .connected,
               let char = txCharacteristic else { return }
 
         let payload = Data(bytes)
