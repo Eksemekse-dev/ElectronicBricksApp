@@ -8,7 +8,9 @@ enum BuWizzSpec {
     static let appCharPrefix = "50052901"
     static let appCharShort = CBUUID(string: "2901")
     static let appCharLong = CBUUID(string: "00002901-0000-1000-8000-00805F9B34FB")
-    static let cmdSetMotor: UInt8 = 0x30
+    static let cmdSetMotorExtended: UInt8 = 0x31
+    static let cmdSetMotorRamp: UInt8 = 0x33
+    static let cmdSetPIDParams: UInt8 = 0x53
     static let cmdSetPUPortFunction: UInt8 = 0x50
     static let cmdSetServoRef: UInt8 = 0x52
     static let puFuncPositionServo: UInt8 = 0x15
@@ -77,11 +79,9 @@ final class BuWizzController: NSObject, ObservableObject {
     @Published var lastFrameHex = "--"
     @Published var channelValuesPreview: [Int] = Array(repeating: 0, count: 6)
 
-    // Początkowa pozycja serwa odczytana po połączeniu (jako punkt 0)
-    @Published var initialServoZeroNormalized: Double = 0.0
+    // Pozycja enkodera (w stopniach) odczytana po połączeniu, traktowana jako punkt 0
     @Published var initialServoZeroAngleDeg: Int = 0
     @Published var servoAngleDegPreview: Int = 0
-    @Published var hasCapturedInitialZero: Bool = false
 
     @Published var lightLatched: [Bool] = Array(repeating: false, count: 6)
     @Published var indicatorLatched: [Bool] = Array(repeating: false, count: 6)
@@ -98,10 +98,13 @@ final class BuWizzController: NSObject, ObservableObject {
     }
 
     @Published var servoPortIndex: Int = 0 {
+        willSet {
+            // Przed zmianą portu zatrzymaj silniki i wyśrodkuj stare serwo
+            sendMotors0x31(Array(repeating: 0, count: 6), servoOffsetDeg: 0)
+        }
         didSet {
             syncServoPortFlags()
-            hasCapturedInitialZero = false
-            applyPUPositionServoModeIfConnected()
+            resetServoSetup() // ponowna konfiguracja przy następnym raporcie statusu
             saveConfig()
         }
     }
@@ -135,6 +138,12 @@ final class BuWizzController: NSObject, ObservableObject {
     private var serviceTimeoutTimer: Timer?
     private var pulsePhase: Double = 0.0
     private var blinkCounter: Int = 0
+
+    private enum ServoSetupState { case idle, configuring, ready }
+    private var servoState: ServoSetupState = .idle
+    private var servoSetupGeneration = 0
+    private var motorPositions: [Int32] = [0, 0, 0, 0] // pozycje względne portów PU 1–4
+    private var servoZeroPosition: Int32 = 0
     private var prevTriggerPressed: [Bool] = Array(repeating: false, count: 6)
 
     override init() {
@@ -176,36 +185,94 @@ final class BuWizzController: NSObject, ObservableObject {
         }
     }
 
-    // Ręczne ustawienie obecnej pozycji jako nowego 0 (poza automatycznym odczytem po połączeniu)
+    // Ręczne ustawienie obecnej (zmierzonej) pozycji jako nowego 0
     func recaptureCurrentServoAsZero() {
-        initialServoZeroNormalized = currentServoPowerRatio()
-        initialServoZeroAngleDeg = Int((initialServoZeroNormalized * maxAngleDegrees).rounded())
-        hasCapturedInitialZero = true
-        sendServoPosition0x52(portIndex: servoPortIndex, normalized: initialServoZeroNormalized)
-        log("Zaktualizowano punkt 0 serwa: \(initialServoZeroAngleDeg)° (\(String(format: "%+.2f", initialServoZeroNormalized)))")
-    }
-
-    private func currentServoPowerRatio() -> Double {
-        if ports.indices.contains(servoPortIndex) {
-            return max(0.0, min(1.0, ports[servoPortIndex].powerLimitPercent / 100.0))
+        guard servoState == .ready else {
+            log("Serwo jeszcze niegotowe")
+            return
         }
-        return 1.0
+        servoZeroPosition = motorPositions[servoPortIndex]
+        initialServoZeroAngleDeg = Int(servoZeroPosition)
+        servoAngleDegPreview = 0
+        log("Zaktualizowano punkt 0 serwa: \(initialServoZeroAngleDeg)°")
     }
 
-    // MARK: - Tryb PU Pozycja (0x50 + 0x52)
+    // MARK: - Tryb PU Pozycja (0x50 + 0x53 + 0x52)
 
-    func applyPUPositionServoModeIfConnected() {
-        guard isConnected, servoPortIndex < 4 else { return }
-        var functions: [UInt8] = [
-            BuWizzSpec.puFuncSimplePWM,
-            BuWizzSpec.puFuncSimplePWM,
-            BuWizzSpec.puFuncSimplePWM,
-            BuWizzSpec.puFuncSimplePWM
+    private func resetServoSetup() {
+        servoSetupGeneration += 1 // unieważnia trwającą sekwencję
+        servoState = .idle
+        servoAngleDegPreview = 0
+    }
+
+    // Wywoływane po pierwszym raporcie statusu, gdy znamy już faktyczną pozycję silnika
+    private func configureServo() {
+        servoState = .configuring
+        servoSetupGeneration += 1
+        let idx = servoPortIndex
+        servoZeroPosition = motorPositions[idx]
+        initialServoZeroAngleDeg = Int(servoZeroPosition)
+
+        var functions = [UInt8](repeating: BuWizzSpec.puFuncSimplePWM, count: 4)
+        functions[idx] = BuWizzSpec.puFuncPositionServo
+
+        var refs: [Int32] = [0, 0, 0, 0]
+        refs[idx] = servoZeroPosition
+        let reference = servoReferenceCommand(refs)
+
+        var steps: [[UInt8]] = [
+            [BuWizzSpec.cmdSetMotorRamp] + [UInt8](repeating: 0, count: 12),
+            reference
         ]
-        functions[servoPortIndex] = BuWizzSpec.puFuncPositionServo
-        let cmd: [UInt8] = [BuWizzSpec.cmdSetPUPortFunction] + functions
-        sendRawBytes(cmd)
-        log("Ustawiono 0x50 PU Position Servo (0x15) na Porcie \(servoPortIndex + 1)")
+        // 0x31 bez ruchu: serwo trzyma punkt 0, pozostałe porty stoją
+        var idle: [UInt8] = [BuWizzSpec.cmdSetMotorExtended]
+        refs.forEach { appendLittleEndian($0, to: &idle) }
+        idle += [0, 0, brakeMask, lutMask]
+
+        // BuWizz3 potrafi nie przyjąć trybu za pierwszym razem, więc powtarzamy
+        for _ in 0..<4 {
+            steps.append([BuWizzSpec.cmdSetPUPortFunction] + functions)
+            steps.append(pidCommand(portIndex: idx))
+            steps.append(reference)
+            steps.append(idle)
+        }
+
+        log("Konfiguruję serwo na porcie \(idx + 1), punkt 0 = \(initialServoZeroAngleDeg)°")
+        runServoSetup(steps, generation: servoSetupGeneration)
+    }
+
+    private func runServoSetup(_ steps: [[UInt8]], generation: Int) {
+        guard generation == servoSetupGeneration, isConnected else { return }
+        guard let step = steps.first else {
+            servoState = .ready
+            log("Serwo gotowe")
+            return
+        }
+        sendRawBytes(step, preferResponse: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.runServoSetup(Array(steps.dropFirst()), generation: generation)
+        }
+    }
+
+    private func servoReferenceCommand(_ refs: [Int32]) -> [UInt8] {
+        var bytes: [UInt8] = [BuWizzSpec.cmdSetServoRef]
+        refs.forEach { appendLittleEndian($0, to: &bytes) }
+        return bytes
+    }
+
+    // Domyślne parametry PID serwa (takie jak w BrickController2)
+    private func pidCommand(portIndex: Int) -> [UInt8] {
+        var bytes: [UInt8] = [BuWizzSpec.cmdSetPIDParams, UInt8(portIndex)]
+        // outLP, D_LP, speed_LP, Kp, Ki, Kd, Liml, limit zmiany referencji
+        let params: [Float] = [0, 0, 0.6, 0.5, 0.01, -1, 20, 50]
+        params.forEach { appendLittleEndian($0.bitPattern, to: &bytes) }
+        // limOut, DeadbandOut, DeadbandOutBoost, tryb
+        bytes += [127, 5, 10, BuWizzSpec.puFuncPositionServo]
+        return bytes
+    }
+
+    private func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to bytes: inout [UInt8]) {
+        withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
     }
 
     // MARK: - BLE, Pad i dioda PS4
@@ -218,8 +285,7 @@ final class BuWizzController: NSObject, ObservableObject {
         }
         serviceTimeoutTimer?.invalidate()
         isConnected = false
-        hasCapturedInitialZero = false
-        initialServoZeroNormalized = 0.0
+        resetServoSetup()
         initialServoZeroAngleDeg = 0
         txCharacteristic = nil
         targetPeripheral = nil
@@ -283,7 +349,7 @@ final class BuWizzController: NSObject, ObservableObject {
             syncServoPortFlags()
             return
         }
-        servoPortIndex = max(0, min(5, decoded.servoPortIndex))
+        servoPortIndex = max(0, min(3, decoded.servoPortIndex))
         if let dz = decoded.deadzone {
             deadzone = max(0.0, min(0.35, dz))
         }
@@ -430,28 +496,18 @@ final class BuWizzController: NSObject, ObservableObject {
         batteryLevelCode = levelBits
         batteryVoltage = volts
 
-        // Wyznacz pozycję początkową serwa jako punkt 0 po pierwszym raporcie po połączeniu
-        if isConnected && !hasCapturedInitialZero {
-            captureInitialZeroFromStatus(data)
-        }
-    }
-
-    private func captureInitialZeroFromStatus(_ data: Data) {
-        // Jeśli w raporcie jest dodatkowy bajt pozycji/kąta dla portu serwa, odczytaj go; inaczej wyznacz neutralną pozycję 0 z aktualnego limitu
-        let idx = servoPortIndex
-        let powerRatio = currentServoPowerRatio()
-        var initialNorm: Double = 0.0
-
-        if data.count > (3 + idx) {
-            let signedByte = Int8(bitPattern: data[3 + idx])
-            initialNorm = max(-1.0, min(1.0, Double(signedByte) / 127.0))
+        // Bajty 22–53: 4 x (typ, prędkość, pozycja absolutna Int16, pozycja względna Int32)
+        let bytes = [UInt8](data)
+        guard bytes.count >= 54 else { return }
+        for port in 0..<4 {
+            let offset = 22 + port * 8 + 4
+            let raw = (0..<4).reduce(UInt32(0)) { $0 | (UInt32(bytes[offset + $1]) << (8 * $1)) }
+            motorPositions[port] = Int32(bitPattern: raw)
         }
 
-        initialServoZeroNormalized = initialNorm
-        initialServoZeroAngleDeg = Int((initialNorm * maxAngleDegrees).rounded())
-        hasCapturedInitialZero = true
-        sendServoPosition0x52(portIndex: idx, normalized: initialNorm * powerRatio)
-        log("Odczytano pozycję początkową serwa po połączeniu -> punkt 0 = \(initialServoZeroAngleDeg)°")
+        if isConnected && servoState == .idle {
+            configureServo()
+        }
     }
 
     private func readSourceValue(_ source: PadInputSource) -> Double {
@@ -521,14 +577,14 @@ final class BuWizzController: NSObject, ObservableObject {
             indicatorLatched[i] = false
             prevTriggerPressed[i] = false
         }
-        sendServoPosition0x52(portIndex: servoPortIndex, normalized: initialServoZeroNormalized)
-        sendMotorBytes0x30(Array(repeating: 0, count: 6))
+        // Silniki stop, serwo wraca do punktu 0
+        sendMotors0x31(Array(repeating: 0, count: 6), servoOffsetDeg: 0)
     }
 
     private func transmitAllPorts() {
         var channelBytes: [Int8] = Array(repeating: 0, count: 6)
         let blinkOn = ((blinkCounter / 16) % 2) == 0
-        var activeServoNorm: Double = initialServoZeroNormalized
+        var activeServoNorm: Double = 0.0
 
         for port in ports where (0..<6).contains(port.portIndex) {
             let idx = port.portIndex
@@ -544,8 +600,8 @@ final class BuWizzController: NSObject, ObservableObject {
 
             if idx == servoPortIndex || port.isServo {
                 if abs(effectiveInput) < deadzone {
-                    // Powrót do początkowej pozycji wyznaczonej jako 0 po połączeniu
-                    activeServoNorm = max(-1.0, min(1.0, initialServoZeroNormalized * powerRatio))
+                    // Powrót do punktu 0
+                    activeServoNorm = 0.0
                 } else {
                     activeServoNorm = max(-1.0, min(1.0, effectiveInput * powerRatio))
                 }
@@ -580,30 +636,10 @@ final class BuWizzController: NSObject, ObservableObject {
 
         channelValuesPreview = channelBytes.map { Int($0) }
 
-        if servoPortIndex < 4 {
-            sendServoPosition0x52(portIndex: servoPortIndex, normalized: activeServoNorm)
-        } else {
-            sendMotorBytes0x30(channelBytes)
+        // Wysyłka co 100 ms (co 4. takt), żeby nie zapchać kolejki komend BuWizz3
+        if blinkCounter % 4 == 0 {
+            sendMotors0x31(channelBytes, servoOffsetDeg: Int32((activeServoNorm * maxAngleDegrees).rounded()))
         }
-    }
-
-    private func sendServoPosition0x52(portIndex: Int, normalized: Double) {
-        guard (0..<4).contains(portIndex) else { return }
-        let clamped = max(-1.0, min(1.0, normalized))
-        let angleDeg = Int32((clamped * maxAngleDegrees).rounded())
-        servoAngleDegPreview = Int(angleDeg)
-
-        var refs: [Int32] = [0, 0, 0, 0]
-        refs[portIndex] = angleDeg
-
-        var bytes: [UInt8] = [BuWizzSpec.cmdSetServoRef]
-        for r in refs {
-            var le = r.littleEndian
-            withUnsafeBytes(of: &le) { rawBuf in
-                bytes.append(contentsOf: rawBuf)
-            }
-        }
-        sendRawBytes(bytes, updateLastFrame: true)
     }
 
     private func computeLinearMotorByte(rawValue: Double, powerRatio: Double) -> Int8 {
@@ -619,15 +655,25 @@ final class BuWizzController: NSObject, ObservableObject {
         return Int8((clamped * 127.0).rounded())
     }
 
-    private func sendMotorBytes0x30(_ chValues: [Int8]) {
-        var packet: [UInt8] = [BuWizzSpec.cmdSetMotor]
-        packet.append(contentsOf: chValues.prefix(6).map { UInt8(bitPattern: $0) })
+    // 0x31: porty 1–4 jako Int32 (PWM albo kąt serwa), porty 5–6 jako Int8
+    private func sendMotors0x31(_ chValues: [Int8], servoOffsetDeg: Int32) {
+        guard servoState == .ready else { return }
+        var packet: [UInt8] = [BuWizzSpec.cmdSetMotorExtended]
+        for port in 0..<4 {
+            let value: Int32 = port == servoPortIndex
+                ? servoZeroPosition &+ servoOffsetDeg
+                : Int32(chValues[port])
+            appendLittleEndian(value, to: &packet)
+        }
+        packet.append(UInt8(bitPattern: chValues[4]))
+        packet.append(UInt8(bitPattern: chValues[5]))
         packet.append(brakeMask)
         packet.append(lutMask)
+        servoAngleDegPreview = Int(servoOffsetDeg)
         sendRawBytes(packet, updateLastFrame: true)
     }
 
-    private func sendRawBytes(_ bytes: [UInt8], updateLastFrame: Bool = false) {
+    private func sendRawBytes(_ bytes: [UInt8], updateLastFrame: Bool = false, preferResponse: Bool = false) {
         guard let peripheral = targetPeripheral,
               let char = txCharacteristic else { return }
 
@@ -636,9 +682,9 @@ final class BuWizzController: NSObject, ObservableObject {
             lastFrameHex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
         }
 
-        let writeType: CBCharacteristicWriteType =
-            char.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-        peripheral.writeValue(payload, for: char, type: writeType)
+        let useResponse = !char.properties.contains(.writeWithoutResponse)
+            || (preferResponse && char.properties.contains(.write))
+        peripheral.writeValue(payload, for: char, type: useResponse ? .withResponse : .withoutResponse)
     }
 
     private func isApplicationCharacteristic(_ uuid: CBUUID) -> Bool {
@@ -658,6 +704,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         case .poweredOff:
             connectionState = "Bluetooth wyłączony"
             isConnected = false
+            resetServoSetup()
             log("BT poweredOff")
         case .unauthorized:
             connectionState = "Brak uprawnień Bluetooth"
@@ -725,7 +772,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
     ) {
         serviceTimeoutTimer?.invalidate()
         isConnected = false
-        hasCapturedInitialZero = false
+        resetServoSetup()
         txCharacteristic = nil
         targetPeripheral = nil
         batteryVoltage = nil
@@ -778,14 +825,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
                 isConnected = true
                 connectionState = "Gotowy: \(peripheral.name ?? "BuWizz3")"
                 log("Wybrano char: \(ch.uuid.uuidString)")
-                applyPUPositionServoModeIfConnected()
-                // Jeśli od razu chcemy utrwalić pozycję 0 po połączeniu:
-                if !hasCapturedInitialZero {
-                    initialServoZeroNormalized = 0.0
-                    initialServoZeroAngleDeg = 0
-                    hasCapturedInitialZero = true
-                    sendServoPosition0x52(portIndex: servoPortIndex, normalized: 0.0)
-                }
+                // Serwo konfiguruje się po pierwszym raporcie statusu (handleStatusReport)
             }
         }
     }
