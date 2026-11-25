@@ -58,7 +58,7 @@ struct MainDriveView: View {
 
                 Section("Serwo PU Pozycja (punkt 0 po połączeniu)") {
                     Picker("Port serwa", selection: $ctrl.servoPortIndex) {
-                        ForEach(0..<6, id: \.self) { idx in
+                        ForEach(0..<4, id: \.self) { idx in
                             Text("Port \(idx + 1)").tag(idx)
                         }
                     }
