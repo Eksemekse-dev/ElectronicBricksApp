@@ -60,11 +60,16 @@ struct DiscoveredBuWizz: Identifiable {
     let peripheral: CBPeripheral
     let name: String
     let rssi: Int
+    var kind: HubKind = .buwizz
+    var legoSystemType: UInt8? = nil
 }
 
 final class BuWizzController: NSObject, ObservableObject {
     @Published var connectionState = "Rozłączono"
     @Published var isConnected = false
+    @Published var hubKind: HubKind = .buwizz
+    @Published var portCount = 6
+    @Published var batteryPercent: Int? = nil
     @Published var hasPad = false
     @Published var padLightSupported = false
 
@@ -100,7 +105,7 @@ final class BuWizzController: NSObject, ObservableObject {
     @Published var servoPortIndex: Int = 0 {
         willSet {
             // Przed zmianą portu zatrzymaj silniki i wyśrodkuj stare serwo
-            sendMotors0x31(Array(repeating: 0, count: 6), servoOffsetDeg: 0)
+            sendOutputs(Array(repeating: 0, count: 6), servoOffsetDeg: 0, force: true)
         }
         didSet {
             syncServoPortFlags()
@@ -144,6 +149,15 @@ final class BuWizzController: NSObject, ObservableObject {
     private var servoSetupGeneration = 0
     private var motorPositions: [Int32] = [0, 0, 0, 0] // pozycje względne portów PU 1–4
     private var servoZeroPosition: Int32 = 0
+
+    private var driver: HubDriver? // nil = BuWizz3
+    private var legoSystemType: UInt8?
+
+    /// Port serwa istniejący na aktualnym hubie (nil = brak serwa)
+    private var activeServoPort: Int? {
+        let limit = hubKind == .buwizz ? 4 : portCount
+        return (0..<limit).contains(servoPortIndex) ? servoPortIndex : nil
+    }
     private var prevTriggerPressed: [Bool] = Array(repeating: false, count: 6)
 
     override init() {
@@ -187,11 +201,15 @@ final class BuWizzController: NSObject, ObservableObject {
 
     // Ręczne ustawienie obecnej (zmierzonej) pozycji jako nowego 0
     func recaptureCurrentServoAsZero() {
-        guard servoState == .ready else {
+        if let driver = driver {
+            driver.recaptureZero()
+            return
+        }
+        guard servoState == .ready, let port = activeServoPort else {
             log("Serwo jeszcze niegotowe")
             return
         }
-        servoZeroPosition = motorPositions[servoPortIndex]
+        servoZeroPosition = motorPositions[port]
         initialServoZeroAngleDeg = Int(servoZeroPosition)
         servoAngleDegPreview = 0
         log("Zaktualizowano punkt 0 serwa: \(initialServoZeroAngleDeg)°")
@@ -209,11 +227,14 @@ final class BuWizzController: NSObject, ObservableObject {
     private func configureServo() {
         servoState = .configuring
         servoSetupGeneration += 1
-        let idx = servoPortIndex
+        var functions = [UInt8](repeating: BuWizzSpec.puFuncSimplePWM, count: 4)
+        guard let idx = activeServoPort else {
+            // Bez serwa: wszystkie porty PU w trybie PWM
+            runServoSetup([[BuWizzSpec.cmdSetPUPortFunction] + functions], generation: servoSetupGeneration)
+            return
+        }
         servoZeroPosition = motorPositions[idx]
         initialServoZeroAngleDeg = Int(servoZeroPosition)
-
-        var functions = [UInt8](repeating: BuWizzSpec.puFuncSimplePWM, count: 4)
         functions[idx] = BuWizzSpec.puFuncPositionServo
 
         var refs: [Int32] = [0, 0, 0, 0]
@@ -245,7 +266,7 @@ final class BuWizzController: NSObject, ObservableObject {
         guard generation == servoSetupGeneration, isConnected else { return }
         guard let step = steps.first else {
             servoState = .ready
-            log("Serwo gotowe")
+            log("BuWizz3 skonfigurowany")
             return
         }
         sendRawBytes(step, preferResponse: true)
@@ -285,7 +306,7 @@ final class BuWizzController: NSObject, ObservableObject {
         }
         serviceTimeoutTimer?.invalidate()
         isConnected = false
-        resetServoSetup()
+        resetHub()
         initialServoZeroAngleDeg = 0
         txCharacteristic = nil
         targetPeripheral = nil
@@ -326,6 +347,17 @@ final class BuWizzController: NSObject, ObservableObject {
 
     func connect(to item: DiscoveredBuWizz) {
         central.stopScan()
+        if let old = targetPeripheral, old.identifier != item.id {
+            stopAllPortsNow()
+            central.cancelPeripheralConnection(old)
+        }
+        isConnected = false
+        txCharacteristic = nil
+        batteryVoltage = nil
+        batteryLevelCode = nil
+        isCharging = false
+        resetHub()
+        legoSystemType = item.legoSystemType
         targetPeripheral = item.peripheral
         item.peripheral.delegate = self
         connectionState = "Łączę z \(item.name)..."
@@ -338,7 +370,7 @@ final class BuWizzController: NSObject, ObservableObject {
         stopAllPortsNow()
         central.stopScan()
         if let p = targetPeripheral {
-            log("Rozłączanie z \(p.name ?? "BuWizz3")")
+            log("Rozłączanie z \(p.name ?? "hub")")
             central.cancelPeripheralConnection(p)
         }
     }
@@ -349,7 +381,7 @@ final class BuWizzController: NSObject, ObservableObject {
             syncServoPortFlags()
             return
         }
-        servoPortIndex = max(0, min(3, decoded.servoPortIndex))
+        servoPortIndex = max(-1, min(5, decoded.servoPortIndex))
         if let dz = decoded.deadzone {
             deadzone = max(0.0, min(0.35, dz))
         }
@@ -473,7 +505,11 @@ final class BuWizzController: NSObject, ObservableObject {
     }
 
     private func batteryNormalizedRatio() -> Double {
-        if let v = batteryVoltage {
+        if let percent = batteryPercent {
+            return max(0.0, min(1.0, Double(percent) / 100.0))
+        }
+        // Skala napięcia poniżej dotyczy tylko BuWizz3
+        if hubKind == .buwizz, let v = batteryVoltage {
             return max(0.0, min(1.0, (v - 9.0) / 6.35))
         }
         if let lvl = batteryLevelCode {
@@ -578,7 +614,7 @@ final class BuWizzController: NSObject, ObservableObject {
             prevTriggerPressed[i] = false
         }
         // Silniki stop, serwo wraca do punktu 0
-        sendMotors0x31(Array(repeating: 0, count: 6), servoOffsetDeg: 0)
+        sendOutputs(Array(repeating: 0, count: 6), servoOffsetDeg: 0, force: true)
     }
 
     private func transmitAllPorts() {
@@ -638,7 +674,7 @@ final class BuWizzController: NSObject, ObservableObject {
 
         // Wysyłka co 100 ms (co 4. takt), żeby nie zapchać kolejki komend BuWizz3
         if blinkCounter % 4 == 0 {
-            sendMotors0x31(channelBytes, servoOffsetDeg: Int32((activeServoNorm * maxAngleDegrees).rounded()))
+            sendOutputs(channelBytes, servoOffsetDeg: Int32((activeServoNorm * maxAngleDegrees).rounded()))
         }
     }
 
@@ -653,6 +689,52 @@ final class BuWizzController: NSObject, ObservableObject {
     private func doubleToInt8(_ value: Double) -> Int8 {
         let clamped = max(-1.0, min(1.0, value))
         return Int8((clamped * 127.0).rounded())
+    }
+
+    private func sendOutputs(_ channels: [Int8], servoOffsetDeg: Int32, force: Bool = false) {
+        if let driver = driver {
+            guard isConnected else { return }
+            servoAngleDegPreview = Int(servoOffsetDeg)
+            driver.send(power: channels, servoPort: activeServoPort,
+                        servoOffsetDeg: Int(servoOffsetDeg), force: force)
+        } else {
+            sendMotors0x31(channels, servoOffsetDeg: servoOffsetDeg)
+        }
+    }
+
+    // MARK: - Huby PU i Pybricks
+
+    private func resetHub() {
+        resetServoSetup()
+        driver = nil
+        hubKind = .buwizz
+        portCount = 6
+        batteryPercent = nil
+    }
+
+    private func attachDriver(_ newDriver: HubDriver, kind: HubKind) {
+        driver = newDriver
+        hubKind = kind
+        newDriver.onLog = { [weak self] in self?.log($0) }
+        newDriver.onPortCount = { [weak self] in self?.portCount = max(1, min(6, $0)) }
+        newDriver.onBattery = { [weak self] percent, voltage in
+            self?.batteryPercent = percent
+            self?.batteryVoltage = voltage
+        }
+        newDriver.onServoZero = { [weak self] in self?.initialServoZeroAngleDeg = $0 }
+        newDriver.onState = { [weak self] state in
+            self?.connectionState = "\(kind.title): \(state)"
+        }
+        newDriver.write = { [weak self] in self?.sendRawBytes($0, updateLastFrame: true) }
+        if let lego = newDriver as? LegoHubDriver {
+            lego.configure(systemType: legoSystemType)
+        } else {
+            portCount = 6
+        }
+    }
+
+    func startPybricksProgram() {
+        (driver as? PybricksHubDriver)?.startProgram()
     }
 
     // 0x31: porty 1–4 jako Int32 (PWM albo kąt serwa), porty 5–6 jako Int8
@@ -729,11 +811,28 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         let looksLikeBuWizz = name.localizedCaseInsensitiveContains("buwizz")
             || advUUIDs.contains(BuWizzSpec.serviceUUID)
 
+        var kind = HubKind.buwizz
+        var systemType: UInt8? = nil
+        if advUUIDs.contains(PybricksSpec.serviceUUID) {
+            kind = .pybricks
+        } else if advUUIDs.contains(LegoSpec.serviceUUID) {
+            kind = .lego
+            // Dane producenta: ID firmy (2 bajty), stan przycisku, typ systemu
+            if let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data, data.count >= 4 {
+                systemType = [UInt8](data)[3]
+            }
+        }
+        let autoConnect = looksLikeBuWizz
+            || kind == .pybricks
+            || (systemType.map { LegoSpec.supportedSystemTypes.contains($0) } ?? false)
+
         let entry = DiscoveredBuWizz(
             id: peripheral.identifier,
             peripheral: peripheral,
             name: name,
-            rssi: rssiInt
+            rssi: rssiInt,
+            kind: kind,
+            legoSystemType: systemType
         )
 
         if let idx = discoveredDevices.firstIndex(where: { $0.id == entry.id }) {
@@ -743,7 +842,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
             log("Wykryto: \(name) (\(rssiInt) dBm)")
         }
 
-        if looksLikeBuWizz && targetPeripheral == nil && !isConnected {
+        if autoConnect && targetPeripheral == nil && !isConnected {
             connect(to: entry)
         }
     }
@@ -758,6 +857,7 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
+        if let target = targetPeripheral, target.identifier != peripheral.identifier { return }
         serviceTimeoutTimer?.invalidate()
         isConnected = false
         targetPeripheral = nil
@@ -770,9 +870,11 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
+        // Spóźnione zdarzenie od poprzedniego huba nie może rozłączyć nowego
+        if let target = targetPeripheral, target.identifier != peripheral.identifier { return }
         serviceTimeoutTimer?.invalidate()
         isConnected = false
-        resetServoSetup()
+        resetHub()
         txCharacteristic = nil
         targetPeripheral = nil
         batteryVoltage = nil
@@ -796,6 +898,15 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
 
         log("Znaleziono usług: \(services.count)")
+        // Rodzaj huba rozpoznajemy po usługach (pewniejsze niż rozgłoszenie)
+        driver = nil
+        hubKind = .buwizz
+        portCount = 6
+        if services.contains(where: { $0.uuid == PybricksSpec.serviceUUID }) {
+            attachDriver(PybricksHubDriver(), kind: .pybricks)
+        } else if services.contains(where: { $0.uuid == LegoSpec.serviceUUID }) {
+            attachDriver(LegoHubDriver(), kind: .lego)
+        }
         for svc in services {
             log("Usługa: \(svc.uuid.uuidString)")
             peripheral.discoverCharacteristics(nil, for: svc)
@@ -815,6 +926,13 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
 
         for ch in chars {
             log("Char \(ch.uuid.uuidString) props=\(ch.properties.rawValue)")
+            if let driver = driver {
+                if ch.uuid == driver.charUUID {
+                    txCharacteristic = ch
+                    peripheral.setNotifyValue(true, for: ch)
+                }
+                continue
+            }
             let canWrite = ch.properties.contains(.write) || ch.properties.contains(.writeWithoutResponse)
 
             if isApplicationCharacteristic(ch.uuid) && canWrite {
@@ -836,8 +954,38 @@ extension BuWizzController: CBCentralManagerDelegate, CBPeripheralDelegate {
         error: Error?
     ) {
         guard error == nil, let value = characteristic.value else { return }
-        if isApplicationCharacteristic(characteristic.uuid) {
+        if let driver = driver {
+            if characteristic.uuid == driver.charUUID {
+                driver.handle(value)
+            }
+        } else if isApplicationCharacteristic(characteristic.uuid) {
             handleStatusReport(value)
         }
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard let driver = driver, characteristic.uuid == driver.charUUID else { return }
+        if let error = error {
+            log("Błąd powiadomień: \(error.localizedDescription)")
+            return
+        }
+        isConnected = true
+        connectionState = "\(hubKind.title): \(peripheral.name ?? "hub")"
+        driver.start()
+    }
+
+    func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        if let error = error {
+            log("Błąd zapisu: \(error.localizedDescription)")
+        }
+        driver?.writeCompleted()
     }
 }

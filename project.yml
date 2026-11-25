@@ -14,7 +14,7 @@ targets:
       properties:
         CFBundleDisplayName: BuWizzPad
         UILaunchScreen: {}
-        NSBluetoothAlwaysUsageDescription: Aplikacja łączy się z modułem BuWizz3 przez Bluetooth Low Energy.
+        NSBluetoothAlwaysUsageDescription: Aplikacja łączy się z hubem (BuWizz3, Powered Up, Pybricks) przez Bluetooth Low Energy.
     settings:
       base:
         SWIFT_VERSION: "5.9"
