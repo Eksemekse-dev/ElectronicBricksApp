@@ -66,6 +66,12 @@ extension PortAssignment {
     ]
 }
 
+/// Ustawienia funkcji z programu Pybricks (@pad_function), zapamiętywane po nazwie funkcji
+struct FunctionSetting: Codable, Equatable {
+    var source: PadInputSource = .none
+    var enabled: Bool = true
+}
+
 struct DiscoveredBuWizz: Identifiable {
     let id: UUID
     let peripheral: CBPeripheral

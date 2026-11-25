@@ -51,6 +51,13 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         didSet { saveConfig() }
     }
 
+    // Funkcje z programu Pybricks: lista z huba, ustawienia po nazwie
+    @Published var hubFunctions: [String] = []
+    @Published var functionSettings: [String: FunctionSetting] = [:] {
+        didSet { saveConfig() }
+    }
+    private var prevFunctionPressed: [Bool] = []
+
     var brakeMask: UInt8 = 0x00
     var lutMask: UInt8 = 0x00
 
@@ -62,6 +69,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         var maxAngleDegrees: Double?
         var ports: [PortAssignment]
         var nickname: String?
+        var functions: [String: FunctionSetting]?
     }
 
     // Stare ustawienia (jeden hub) służą jako wzór dla nowych hubów
@@ -126,6 +134,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
             ports = decoded.ports
         }
         nickname = decoded.nickname ?? ""
+        functionSettings = decoded.functions ?? [:]
         syncServoPortFlags()
     }
 
@@ -136,7 +145,8 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
             deadzone: deadzone,
             maxAngleDegrees: maxAngleDegrees,
             ports: ports,
-            nickname: nickname
+            nickname: nickname,
+            functions: functionSettings
         )
         guard let encoded = try? JSONEncoder().encode(cfg) else { return }
         UserDefaults.standard.set(encoded, forKey: configKey)
@@ -293,6 +303,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         isConnected = false
         txCharacteristic = nil
         driver = nil
+        hubFunctions = []
         connectionState = "Rozłączono"
     }
 
@@ -428,10 +439,16 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
 
             switch port.mode {
             case .normal:
-                channelBytes[idx] = computeLinearMotorByte(
-                    rawValue: effectiveInput,
-                    powerRatio: powerRatio
-                )
+                if releasesUnassignedPorts && port.source == .none {
+                    // Port bez sterowania: program na hubie go nie rusza,
+                    // dzięki temu może go używać własna funkcja
+                    channelBytes[idx] = PybricksHubDriver.releasedPort
+                } else {
+                    channelBytes[idx] = computeLinearMotorByte(
+                        rawValue: effectiveInput,
+                        powerRatio: powerRatio
+                    )
+                }
 
             case .frontLight:
                 if lightLatched[idx] {
@@ -451,12 +468,47 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
             }
         }
 
-        channelValuesPreview = channelBytes.map { Int($0) }
+        channelValuesPreview = channelBytes.map { $0 == PybricksHubDriver.releasedPort ? 0 : Int($0) }
+
+        updateFunctionTriggers(pad: pad)
 
         // Wysyłka co 100 ms (co 4. takt), żeby nie zapchać kolejki komend BuWizz3
         if blinkCounter % 4 == 0 {
             sendOutputs(channelBytes, servoOffsetDeg: Int32((activeServoNorm * maxAngleDegrees).rounded()))
         }
+    }
+
+    // MARK: - Funkcje z programu Pybricks
+
+    /// Tylko program Pybricks rozumie port zwolniony ("~"); BuWizz3 i LEGO dostają zwykłe 0
+    private var releasesUnassignedPorts: Bool {
+        driver is PybricksHubDriver
+    }
+
+    /// Funkcja uruchamia się raz po naciśnięciu przypisanego przycisku (gałka: wychylenie > 50%)
+    private func updateFunctionTriggers(pad: GCExtendedGamepad?) {
+        if prevFunctionPressed.count != hubFunctions.count {
+            prevFunctionPressed = Array(repeating: false, count: hubFunctions.count)
+        }
+        for (index, name) in hubFunctions.enumerated() {
+            let setting = functionSettings[name] ?? FunctionSetting()
+            let pressedNow = setting.enabled
+                && abs(readSourceValue(setting.source, pad: pad)) > 0.5
+            if pressedNow && !prevFunctionPressed[index] {
+                callFunction(at: index)
+            }
+            prevFunctionPressed[index] = pressedNow
+        }
+    }
+
+    func callFunction(at index: Int) {
+        (driver as? PybricksHubDriver)?.callFunction(index)
+    }
+
+    /// Ręczne uruchomienie z ekranu huba (test bez pada)
+    func callFunction(named name: String) {
+        guard let index = hubFunctions.firstIndex(of: name) else { return }
+        callFunction(at: index)
     }
 
     private func computeLinearMotorByte(rawValue: Double, powerRatio: Double) -> Int8 {
@@ -488,6 +540,10 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
     private func attachDriver(_ newDriver: HubDriver, kind: HubKind) {
         driver = newDriver
         hubKind = kind
+        hubFunctions = []
+        if let pybricks = newDriver as? PybricksHubDriver {
+            pybricks.onFunctions = { [weak self] in self?.hubFunctions = $0 }
+        }
         newDriver.onLog = { [weak self] in self?.log($0) }
         newDriver.onPortCount = { [weak self] in self?.portCount = max(1, min(6, $0)) }
         newDriver.onBattery = { [weak self] percent, voltage in

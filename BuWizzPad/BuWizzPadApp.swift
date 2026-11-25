@@ -123,6 +123,49 @@ struct HubRow: View {
     }
 }
 
+struct FunctionRow: View {
+    let name: String
+    @Binding var setting: FunctionSetting
+    let onRun: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(name)
+                    .font(.headline)
+                Spacer()
+                Toggle("Aktywna", isOn: $setting.enabled)
+                    .labelsHidden()
+                Text("Aktywna")
+                    .font(.caption)
+            }
+
+            Picker("Sterowanie", selection: $setting.source) {
+                ForEach(PadInputSource.allCases) { src in
+                    Text(src.rawValue).tag(src)
+                }
+            }
+            .disabled(!setting.enabled)
+
+            HStack {
+                if !setting.enabled {
+                    Text("Wyłączona ze sterowania")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Uruchom teraz") {
+                    onRun()
+                }
+                .buttonStyle(.bordered)
+                .font(.caption)
+                .disabled(!setting.enabled)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct HubDetailView: View {
     let ctrl: BuWizzController
     @ObservedObject var hub: HubSession
@@ -258,6 +301,25 @@ struct HubDetailView: View {
                         }
                         .padding(.vertical, 4)
                         }
+                    }
+                }
+
+                if hub.hubKind == .pybricks && !hub.hubFunctions.isEmpty {
+                    Section("Funkcje z programu na hubie") {
+                        ForEach(Array(hub.hubFunctions.enumerated()), id: \.offset) { _, name in
+                            FunctionRow(
+                                name: name,
+                                setting: Binding(
+                                    get: { hub.functionSettings[name] ?? FunctionSetting() },
+                                    set: { hub.functionSettings[name] = $0 }
+                                ),
+                                onRun: { hub.callFunction(named: name) }
+                            )
+                        }
+
+                        Text("Funkcja uruchamia się raz po naciśnięciu przypisanego przycisku (gałka: po wychyleniu powyżej 50%). Lista odświeża się sama po wgraniu zmienionego programu.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
