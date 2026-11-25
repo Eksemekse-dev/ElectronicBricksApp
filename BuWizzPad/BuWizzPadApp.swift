@@ -13,6 +13,9 @@ struct MainDriveView: View {
     @StateObject private var ctrl = BuWizzController()
 
     private var batterySummaryText: String {
+        if let percent = ctrl.batteryPercent {
+            return "\(percent)%"
+        }
         if ctrl.isCharging {
             if let v = ctrl.batteryVoltage {
                 return String(format: "Ładowanie – pulsuje (%.2f V)", v)
@@ -34,7 +37,13 @@ struct MainDriveView: View {
                 Section("Połączenie i Bateria (Dioda PS4)") {
                     LabeledContent("Status", value: ctrl.connectionState)
                     LabeledContent("Pad", value: ctrl.hasPad ? (ctrl.padLightSupported ? "Pad + dioda LED" : "Wykryty") : "Brak")
-                    LabeledContent("Bateria BuWizz3", value: batterySummaryText)
+                    LabeledContent("Hub", value: ctrl.isConnected ? ctrl.hubKind.title : "—")
+                    LabeledContent("Bateria huba", value: batterySummaryText)
+                    if ctrl.isConnected && ctrl.hubKind == .pybricks {
+                        Button("Uruchom program na hubie") {
+                            ctrl.startPybricksProgram()
+                        }
+                    }
                     HStack {
                         Button("Skanuj i połącz") {
                             ctrl.scanAndConnect()
@@ -58,7 +67,8 @@ struct MainDriveView: View {
 
                 Section("Serwo PU Pozycja (punkt 0 po połączeniu)") {
                     Picker("Port serwa", selection: $ctrl.servoPortIndex) {
-                        ForEach(0..<4, id: \.self) { idx in
+                        Text("Brak serwa").tag(-1)
+                        ForEach(0..<(ctrl.hubKind == .buwizz ? 4 : ctrl.portCount), id: \.self) { idx in
                             Text("Port \(idx + 1)").tag(idx)
                         }
                     }
@@ -88,8 +98,9 @@ struct MainDriveView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Porty (1–6), tryby i limit mocy") {
+                Section("Porty (A = 1, B = 2 …), tryby i limit mocy") {
                     ForEach($ctrl.ports) { $port in
+                        if port.portIndex < ctrl.portCount {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text(port.title)
@@ -154,6 +165,7 @@ struct MainDriveView: View {
                             }
                         }
                         .padding(.vertical, 4)
+                        }
                     }
                 }
 
@@ -183,7 +195,7 @@ struct MainDriveView: View {
                                 ctrl.connect(to: dev)
                             } label: {
                                 HStack {
-                                    Text(dev.name)
+                                    Text(dev.kind == .buwizz ? dev.name : "\(dev.name) (\(dev.kind.title))")
                                     Spacer()
                                     Text("\(dev.rssi) dBm")
                                         .font(.caption.monospaced())

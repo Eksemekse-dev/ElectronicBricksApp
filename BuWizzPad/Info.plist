@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Aplikacja łączy się z modułem BuWizz3 przez Bluetooth Low Energy.</string>
+    <string>Aplikacja łączy się z hubem (BuWizz3, Powered Up, Pybricks) przez Bluetooth Low Energy.</string>
 </dict>
 </plist>
