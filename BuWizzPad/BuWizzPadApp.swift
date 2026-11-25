@@ -24,6 +24,7 @@ private func batteryText(_ hub: HubSession) -> String {
 
 struct MainDriveView: View {
     @StateObject private var ctrl = BuWizzController()
+    @StateObject private var scripts = ScriptStore()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -47,9 +48,15 @@ struct MainDriveView: View {
                         .disabled(ctrl.sessions.isEmpty)
                     }
                     Button("STOP wszystkie silniki", role: .destructive) {
-                        ctrl.stopAll()
+                        ctrl.emergencyStop()
                     }
                     .disabled(ctrl.sessions.isEmpty)
+                }
+
+                Section {
+                    NavigationLink("Skrypty Pybricks") {
+                        ScriptListView(ctrl: ctrl, store: scripts)
+                    }
                 }
 
                 Section("Połączone huby (\(ctrl.sessions.count))") {

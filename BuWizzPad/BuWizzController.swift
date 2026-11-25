@@ -178,6 +178,12 @@ final class BuWizzController: NSObject, ObservableObject {
         sessions.forEach { $0.stopAllPorts() }
     }
 
+    /// Przycisk STOP: zatrzymuje też skrypty działające na hubach Pybricks
+    func emergencyStop() {
+        stopAll()
+        sessions.forEach { $0.stopScript() }
+    }
+
     private func remove(_ hub: HubSession) {
         hub.invalidate()
         sessions.removeAll { $0 === hub }

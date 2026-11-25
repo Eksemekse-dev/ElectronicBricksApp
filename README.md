@@ -32,3 +32,16 @@ hubów, ale iPhone i zasięg Bluetooth tak.
    (albo przycisk na hubie).
 
 Program zatrzymuje silniki, gdy przez 0,5 s nie dostaje komend.
+
+## Własne skrypty (tylko Pybricks)
+
+"Skrypty Pybricks" w aplikacji: napisz lub wklej kod, wybierz hub i "Uruchom".
+Działa na City Hub, Technic Hub, SPIKE Essential, SPIKE Prime i Robot Inventor.
+Move Hub nie ma konsoli, więc tego nie obsługuje.
+
+- Szablon "Jazda padem + własne funkcje": funkcje dopisz w sekcji TWOJE FUNKCJE
+  i przypisz w słowniku FUNKCJE do przycisków A B X Y L1 R1 UP DOWN LEFT RIGHT.
+  Podczas działania funkcji jazda jest wstrzymana.
+- Własna pętla "while True" działa do naciśnięcia "Stop" lub przycisku na hubie.
+- Skrypt nie jest zapisywany na stałe na hubie; po restarcie wyślij go ponownie.
+- Znaki spoza ASCII (np. polskie litery) są zamieniane na "?".

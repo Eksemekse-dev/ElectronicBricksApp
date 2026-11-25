@@ -12,6 +12,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         didSet { saveConfig() }
     }
     @Published var connectionState = "Łączę..."
+    @Published var console: [String] = []
     @Published var isConnected = false
     @Published var hubKind: HubKind = .buwizz
     @Published var portCount = 6
@@ -73,6 +74,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
     private var txCharacteristic: CBCharacteristic?
     private var serviceTimeoutTimer: Timer?
     private var prevTriggerPressed: [Bool] = Array(repeating: false, count: 6)
+    private var prevScriptButtons: Set<String> = []
 
     private enum ServoSetupState { case idle, configuring, ready }
     private var servoState: ServoSetupState = .idle
@@ -399,6 +401,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
 
     func tick(pad: GCExtendedGamepad?, blinkCounter: Int) {
         guard isConnected else { return }
+        updateScriptButtons(pad: pad)
         var channelBytes: [Int8] = Array(repeating: 0, count: 6)
         let blinkOn = ((blinkCounter / 16) % 2) == 0
         var activeServoNorm: Double = 0.0
@@ -498,7 +501,14 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         newDriver.onState = { [weak self] state in
             self?.connectionState = "\(kind.title): \(state)"
         }
-        newDriver.write = { [weak self] in self?.sendRawBytes($0, updateLastFrame: true) }
+        (newDriver as? PybricksHubDriver)?.onOutput = { [weak self] line in
+            guard let self = self else { return }
+            self.console.append(line)
+            if self.console.count > 100 {
+                self.console.removeFirst()
+            }
+        }
+        newDriver.write = { [weak self] in self?.sendRawBytes($0, updateLastFrame: true) ?? false }
         if let lego = newDriver as? LegoHubDriver {
             lego.configure(systemType: legoSystemType)
         } else {
@@ -508,6 +518,38 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
 
     func startPybricksProgram() {
         (driver as? PybricksHubDriver)?.startProgram()
+    }
+
+    // MARK: - Skrypty (tylko Pybricks)
+
+    func runScript(_ code: String) {
+        console.removeAll()
+        (driver as? PybricksHubDriver)?.runScript(code)
+    }
+
+    func stopScript() {
+        (driver as? PybricksHubDriver)?.stopProgram()
+    }
+
+    // Świeżo naciśnięte przyciski pada wywołują funkcje w skrypcie
+    private func updateScriptButtons(pad: GCExtendedGamepad?) {
+        guard let pybricks = driver as? PybricksHubDriver else { return }
+        var pressed: Set<String> = []
+        if let pad = pad {
+            let buttons: [(String, GCControllerButtonInput)] = [
+                ("A", pad.buttonA), ("B", pad.buttonB), ("X", pad.buttonX), ("Y", pad.buttonY),
+                ("L1", pad.leftShoulder), ("R1", pad.rightShoulder),
+                ("UP", pad.dpad.up), ("DOWN", pad.dpad.down),
+                ("LEFT", pad.dpad.left), ("RIGHT", pad.dpad.right)
+            ]
+            for (name, button) in buttons where button.isPressed {
+                pressed.insert(name)
+            }
+        }
+        for name in pressed.subtracting(prevScriptButtons) {
+            pybricks.trigger(name)
+        }
+        prevScriptButtons = pressed
     }
 
     // 0x31: porty 1–4 jako Int32 (PWM albo kąt serwa), porty 5–6 jako Int8
@@ -528,9 +570,10 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         sendRawBytes(packet, updateLastFrame: true)
     }
 
-    private func sendRawBytes(_ bytes: [UInt8], updateLastFrame: Bool = false, preferResponse: Bool = false) {
+    @discardableResult
+    private func sendRawBytes(_ bytes: [UInt8], updateLastFrame: Bool = false, preferResponse: Bool = false) -> Bool {
         guard peripheral.state == .connected,
-              let char = txCharacteristic else { return }
+              let char = txCharacteristic else { return false }
 
         let payload = Data(bytes)
         if updateLastFrame {
@@ -540,6 +583,7 @@ final class HubSession: NSObject, ObservableObject, Identifiable {
         let useResponse = !char.properties.contains(.writeWithoutResponse)
             || (preferResponse && char.properties.contains(.write))
         peripheral.writeValue(payload, for: char, type: useResponse ? .withResponse : .withoutResponse)
+        return true
     }
 
     private func isApplicationCharacteristic(_ uuid: CBUUID) -> Bool {
@@ -664,6 +708,6 @@ extension HubSession: CBPeripheralDelegate {
         if let error = error {
             log("Błąd zapisu: \(error.localizedDescription)")
         }
-        driver?.writeCompleted()
+        driver?.writeCompleted(error: error)
     }
 }
