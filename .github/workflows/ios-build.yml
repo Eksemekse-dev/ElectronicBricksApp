@@ -16,6 +16,32 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Prepare AppIcon
+        run: |
+          set -euo pipefail
+          ICON_SRC="ElectronicBricksApp/Icon/Ikona.png"
+          ICONSET_DIR="ElectronicBricksApp/Assets.xcassets/AppIcon.appiconset"
+          mkdir -p "$ICONSET_DIR"
+
+          sips -s format png -z 1024 1024 "$ICON_SRC" --out "$ICONSET_DIR/icon-1024.png"
+
+          cat << 'EOF' > "$ICONSET_DIR/Contents.json"
+          {
+            "images" : [
+              {
+                "filename" : "icon-1024.png",
+                "idiom" : "universal",
+                "platform" : "ios",
+                "size" : "1024x1024"
+              }
+            ],
+            "info" : {
+              "author" : "xcode",
+              "version" : 1
+            }
+          }
+          EOF
+
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
