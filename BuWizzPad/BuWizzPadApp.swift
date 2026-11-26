@@ -24,6 +24,7 @@ private func batteryText(_ hub: HubSession) -> String {
 
 struct MainDriveView: View {
     @StateObject private var ctrl = BuWizzController()
+    @StateObject private var camera = CameraReceiver()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -50,6 +51,12 @@ struct MainDriveView: View {
                         ctrl.stopAll()
                     }
                     .disabled(ctrl.sessions.isEmpty)
+                }
+
+                Section {
+                    NavigationLink("Kamera z auta") {
+                        CameraView(camera: camera)
+                    }
                 }
 
                 Section("Połączone huby (\(ctrl.sessions.count))") {

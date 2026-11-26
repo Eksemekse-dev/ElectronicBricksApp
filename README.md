@@ -67,3 +67,17 @@ Uwagi:
   program na hubie zatrzymuje jeden raz i dalej go nie rusza.
 - Funkcje działają dopiero z nową wersją programu (powitanie `BP2` z listą funkcji zastąpiło `BP1`).
   Starszy program na hubie nadal steruje silnikami, ale bez funkcji, więc wgraj `buwizzpad_hub.py` ponownie.
+
+## Kamera z auta (telefon z Androidem)
+
+Katalog `android/` to aplikacja CarCam: telefon w aucie wysyła obraz z kamery,
+a iPhone pokazuje go w "Kamera z auta". Jedna aplikacja, dwa tryby do wyboru:
+
+| Tryb | Obraz | Do czego |
+|---|---|---|
+| Wi-Fi | do 640 px, kilkanaście klatek/s | domyślnie; telefon w aucie włącza hotspot, iPhone się do niego łączy |
+| Bluetooth | 128-240 px, kilka klatek/s | gdy nie ma Wi-Fi; wymaga Androida 10+ |
+
+Wi-Fi: w CarCam wybierz Wi-Fi i Start, w iPhone wpisz adres wyświetlony w CarCam
+(zwykle 192.168.43.1). Podgląd można też otworzyć w przeglądarce pod tym adresem.
+APK buduje workflow "Build CarCam (Android)" (artefakt `CarCam-debug-apk`).
