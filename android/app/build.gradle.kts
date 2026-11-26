@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "dev.eksemekse.carcam"
-        minSdk = 29 // kanały L2CAP w Bluetooth wymagają Androida 10
+        minSdk = 21 // L2CAP (szybszy Bluetooth) działa od Androida 10, starsze używają powiadomień GATT
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"

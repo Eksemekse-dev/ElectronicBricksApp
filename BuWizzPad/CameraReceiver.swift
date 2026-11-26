@@ -5,6 +5,7 @@ import CoreBluetooth
 enum CameraSpec {
     static let service = CBUUID(string: "7A1C0001-5B0A-4F6E-9D3A-0C5A11CA3E01")
     static let psmCharacteristic = CBUUID(string: "7A1C0002-5B0A-4F6E-9D3A-0C5A11CA3E01")
+    static let dataCharacteristic = CBUUID(string: "7A1C0003-5B0A-4F6E-9D3A-0C5A11CA3E01")
     static let wifiPort = 8080
 }
 
@@ -36,6 +37,7 @@ final class CameraReceiver: NSObject, ObservableObject {
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var channel: CBL2CAPChannel?
+    private var dataCharacteristic: CBCharacteristic?
     private var buffer = Data()
     private var frameCount = 0
     private var fpsTimer: Timer?
@@ -72,6 +74,7 @@ final class CameraReceiver: NSObject, ObservableObject {
             central?.cancelPeripheralConnection(p)
         }
         peripheral = nil
+        dataCharacteristic = nil
         buffer.removeAll()
         fps = 0
         status = "Zatrzymano"
@@ -157,6 +160,7 @@ final class CameraReceiver: NSObject, ObservableObject {
         guard isRunning, mode == .ble else { return }
         status = "Połączenie przerwane, ponawiam..."
         peripheral = nil
+        dataCharacteristic = nil
         buffer.removeAll()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.beginScan()
@@ -260,7 +264,7 @@ extension CameraReceiver: CBCentralManagerDelegate, CBPeripheralDelegate, Stream
             status = "Brak usługi kamery"
             return
         }
-        peripheral.discoverCharacteristics([CameraSpec.psmCharacteristic], for: service)
+        peripheral.discoverCharacteristics([CameraSpec.psmCharacteristic, CameraSpec.dataCharacteristic], for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -268,15 +272,32 @@ extension CameraReceiver: CBCentralManagerDelegate, CBPeripheralDelegate, Stream
             status = "Brak kanału obrazu"
             return
         }
+        dataCharacteristic = service.characteristics?.first(where: { $0.uuid == CameraSpec.dataCharacteristic })
         peripheral.readValue(for: characteristic)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard characteristic.uuid == CameraSpec.psmCharacteristic,
-              let value = characteristic.value, value.count >= 2 else { return }
-        let psm = CBL2CAPPSM(UInt16(value[0]) | (UInt16(value[1]) << 8))
-        status = "Otwieram kanał obrazu..."
-        peripheral.openL2CAPChannel(psm)
+        guard let value = characteristic.value else { return }
+
+        if characteristic.uuid == CameraSpec.dataCharacteristic {
+            // Tryb powiadomień (starszy Android): kawałki ramki
+            buffer.append(value)
+            parseBLE()
+            return
+        }
+
+        guard characteristic.uuid == CameraSpec.psmCharacteristic, value.count >= 2 else { return }
+        let psmValue = UInt16(value[0]) | (UInt16(value[1]) << 8)
+        if psmValue > 0 {
+            status = "Otwieram kanał obrazu..."
+            peripheral.openL2CAPChannel(CBL2CAPPSM(psmValue))
+        } else if let data = dataCharacteristic {
+            // Telefon bez L2CAP: odbieramy obraz w powiadomieniach GATT
+            status = "Czekam na pierwszą klatkę (wolniejszy tryb)..."
+            peripheral.setNotifyValue(true, for: data)
+        } else {
+            status = "Telefon nie udostępnia kanału obrazu"
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {

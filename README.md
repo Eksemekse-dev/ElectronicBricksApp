@@ -71,12 +71,12 @@ Uwagi:
 ## Kamera z auta (telefon z Androidem)
 
 Katalog `android/` to aplikacja CarCam: telefon w aucie wysyła obraz z kamery,
-a iPhone pokazuje go w "Kamera z auta". Jedna aplikacja, dwa tryby do wyboru:
+a iPhone pokazuje go w "Kamera z auta". Działa na Androidzie 5+. Jedna aplikacja, dwa tryby do wyboru:
 
 | Tryb | Obraz | Do czego |
 |---|---|---|
 | Wi-Fi | do 640 px, kilkanaście klatek/s | domyślnie; telefon w aucie włącza hotspot, iPhone się do niego łączy |
-| Bluetooth | 128-240 px, kilka klatek/s | gdy nie ma Wi-Fi; wymaga Androida 10+ |
+| Bluetooth | 128-240 px, kilka klatek/s (na Androidzie 10+); 1-2 klatki/s na starszym | gdy nie ma Wi-Fi |
 
 Wi-Fi: w CarCam wybierz Wi-Fi i Start, w iPhone wpisz adres wyświetlony w CarCam
 (zwykle 192.168.43.1). Podgląd można też otworzyć w przeglądarce pod tym adresem.
