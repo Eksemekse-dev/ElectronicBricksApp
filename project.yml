@@ -14,6 +14,9 @@ targets:
       properties:
         CFBundleDisplayName: BuWizzPad
         UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: Aplikacja pobiera obraz z kamery w aucie przez sieć Wi-Fi.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         NSBluetoothAlwaysUsageDescription: Aplikacja łączy się z hubem (BuWizz3, Powered Up, Pybricks) przez Bluetooth Low Energy.
     settings:
       base:

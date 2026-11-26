@@ -182,11 +182,15 @@ final class PybricksHubDriver: HubDriver {
     var onServoZero: (Int) -> Void = { _ in }
     var onState: (String) -> Void = { _ in }
     var write: ([UInt8]) -> Void = { _ in }
+    /// Nazwy funkcji zarejestrowanych w programie na hubie (@pad_function)
+    var onFunctions: ([String]) -> Void = { _ in }
 
     private var programReady = false
     private var writePending = false
     private var recaptureRequested = false
-    private var stdoutLine = ""
+    private var stdoutLine: [UInt8] = []
+    private var functionNames: [String] = []
+    private var pendingCalls: [Int] = []
 
     func start() {
         onState("Uruchom program BuWizzPad na hubie")
@@ -206,24 +210,28 @@ final class PybricksHubDriver: HubDriver {
             if b[1] & (1 << 6) == 0 && programReady {
                 programReady = false
                 writePending = false
+                pendingCalls.removeAll()
+                updateFunctions([])
                 onState("Program na hubie zatrzymany")
             }
         } else if event == 0x01 {
             for byte in b.dropFirst() {
                 if byte == 10 {
-                    handleLine(stdoutLine.trimmingCharacters(in: .whitespacesAndNewlines))
-                    stdoutLine = ""
-                } else if stdoutLine.count < 120 {
-                    stdoutLine.append(Character(UnicodeScalar(byte)))
+                    let text = String(decoding: stdoutLine, as: UTF8.self)
+                    handleLine(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    stdoutLine.removeAll()
+                } else if stdoutLine.count < 600 {
+                    stdoutLine.append(byte)
                 }
             }
         }
     }
 
-    // Powitanie "BP1,<liczba portów>,<napięcie mV>"
+    // Powitanie "BP2,<liczba portów>,<napięcie mV>,<funkcja>;<funkcja>;..."
+    // (starszy program wysyła "BP1,<liczba portów>,<napięcie mV>" bez funkcji)
     private func handleLine(_ line: String) {
-        let parts = line.split(separator: ",")
-        guard parts.count == 3, parts[0] == "BP1",
+        let parts = line.split(separator: ",", maxSplits: 3, omittingEmptySubsequences: false)
+        guard parts.count >= 3, parts[0] == "BP1" || parts[0] == "BP2",
               let ports = Int(parts[1]), let millivolts = Int(parts[2]) else {
             if !line.isEmpty { onLog("Hub: \(line)") }
             return
@@ -236,11 +244,44 @@ final class PybricksHubDriver: HubDriver {
             onState("Gotowy")
             onLog("Program na hubie odpowiada")
         }
+        if parts[0] == "BP2", parts.count == 4 {
+            updateFunctions(parts[3].split(separator: ";").map(String.init))
+        } else {
+            updateFunctions([])
+        }
+    }
+
+    private func updateFunctions(_ names: [String]) {
+        guard names != functionNames else { return }
+        functionNames = names
+        pendingCalls.removeAll()
+        onFunctions(names)
+        if !names.isEmpty {
+            onLog("Funkcje na hubie: \(names.joined(separator: ", "))")
+        }
+    }
+
+    /// Kolejkuje uruchomienie funkcji o podanym numerze (kolejność z powitania)
+    func callFunction(_ index: Int) {
+        guard programReady, functionNames.indices.contains(index), pendingCalls.count < 8 else { return }
+        pendingCalls.append(index)
     }
 
     func send(power: [Int8], servoPort: Int?, servoOffsetDeg: Int, force: Bool) {
         // Nie kolejkujemy ramek: nowa idzie dopiero po potwierdzeniu poprzedniej
-        guard programReady, force || !writePending else { return }
+        guard programReady else { return }
+        if force {
+            // STOP i zmiana portu serwa kasują zaległe wywołania funkcji
+            pendingCalls.removeAll()
+        }
+        guard force || !writePending else { return }
+        if !force, let index = pendingCalls.first {
+            // Wywołanie funkcji ma pierwszeństwo przed ramką mocy w tym takcie
+            pendingCalls.removeFirst()
+            writePending = true
+            write([0x06] + Self.callFrame(index: index))
+            return
+        }
         writePending = true
         let frame = Self.frame(power: power, servoPort: servoPort,
                                servoOffsetDeg: servoOffsetDeg, recapture: recaptureRequested)
@@ -248,11 +289,23 @@ final class PybricksHubDriver: HubDriver {
         write([0x06] + frame) // 0x06 = zapis na stdin
     }
 
+    /// Wartość Int8.min w power oznacza port niesterowany przez aplikację ("~")
+    static let releasedPort = Int8.min
+
+    // Format opisany w pybricks/buwizzpad_hub.py
+    static func callFrame(index: Int) -> [UInt8] {
+        let marker = UInt8(ascii: "F")
+        let id = UInt8(48 + max(0, min(63, index)))
+        let sum = (Int(marker) + Int(id)) % 64
+        return [marker, id, UInt8(48 + sum), 10]
+    }
+
     // Format opisany w pybricks/buwizzpad_hub.py
     static func frame(power: [Int8], servoPort: Int?, servoOffsetDeg: Int, recapture: Bool) -> [UInt8] {
         var chars: [UInt8] = (0..<6).map { i -> UInt8 in
-            let value = i < power.count ? Double(power[i]) : 0
-            let q = max(-45, min(45, Int((value * 45.0 / 127.0).rounded())))
+            let raw = i < power.count ? power[i] : 0
+            if raw == releasedPort { return UInt8(ascii: "~") }
+            let q = max(-45, min(45, Int((Double(raw) * 45.0 / 127.0).rounded())))
             return UInt8(80 + q)
         }
         if let port = servoPort, (0..<6).contains(port) {
